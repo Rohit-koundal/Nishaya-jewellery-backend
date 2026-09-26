@@ -1,0 +1,111 @@
+const AnalyticsEvent = require('../models/AnalyticsEvent');
+const Order = require('../models/Order');
+const { EVENT_ALIASES, EVENT_NAMES } = require('../models/AnalyticsEvent');
+const { asyncHandler } = require('../middleware/validate');
+const { requireEnum, optionalString } = require('../utils/validators');
+const { recordEvent } = require('../services/analyticsService');
+const { readAttribution } = require('../utils/attribution');
+
+const TRACKABLE_NAMES = EVENT_NAMES.concat(Object.keys(EVENT_ALIASES));
+
+exports.track = asyncHandler(async (req, res) => {
+  const name = requireEnum(req.body?.name, TRACKABLE_NAMES, 'name');
+  const attribution = readAttribution(req.body);
+  const event = await recordEvent({
+    name,
+    storeId: req.store?._id,
+    sessionId: optionalString(req.body?.sessionId, 'sessionId', { max: 80 }),
+    userId: req.user?._id,
+    productId: req.body?.productId,
+    orderId: req.body?.orderId,
+    path: optionalString(req.body?.path, 'path', { max: 300 }),
+    searchQuery: optionalString(req.body?.searchQuery || req.body?.query, 'searchQuery', { max: 120 }),
+    source: attribution?.source,
+    campaign: attribution?.campaign,
+    reelId: attribution?.reelId,
+    metadata: req.body?.metadata,
+  });
+  res.status(202).json({ success: true, id: event?._id });
+});
+
+exports.funnel = asyncHandler(async (req, res) => {
+  const match = { ...(req.tenantFilter || {}) };
+  const since = daysAgo(req.query.range);
+  if (since) match.createdAt = { $gte: since };
+
+  const rows = await AnalyticsEvent.aggregate([
+    { $match: match },
+    { $group: { _id: '$name', count: { $sum: 1 } } },
+  ]);
+  const byName = Object.fromEntries(EVENT_NAMES.map((name) => [name, 0]));
+  for (const row of rows) byName[row._id] = row.count;
+
+  const sources = await AnalyticsEvent.aggregate([
+    { $match: { ...match, source: { $exists: true, $ne: '' } } },
+    { $group: { _id: '$source', count: { $sum: 1 } } },
+    { $sort: { count: -1 } },
+    { $limit: 20 },
+  ]);
+
+  const campaigns = await AnalyticsEvent.aggregate([
+    { $match: { ...match, $or: [{ campaign: { $exists: true, $ne: '' } }, { reelId: { $exists: true, $ne: '' } }] } },
+    {
+      $group: {
+        _id: { source: '$source', campaign: '$campaign', reelId: '$reelId' },
+        events: { $sum: 1 },
+        productViews: { $sum: { $cond: [{ $eq: ['$name', 'PRODUCT_VIEW'] }, 1, 0] } },
+        addToCart: { $sum: { $cond: [{ $eq: ['$name', 'ADD_TO_CART'] }, 1, 0] } },
+        purchases: { $sum: { $cond: [{ $eq: ['$name', 'PURCHASE'] }, 1, 0] } },
+      },
+    },
+    { $sort: { events: -1 } },
+    { $limit: 20 },
+  ]);
+
+  const orderMatch = { ...(req.tenantFilter || {}), orderStatus: { $ne: 'Cancelled' } };
+  if (since) orderMatch.createdAt = { $gte: since };
+  const attributedOrders = await Order.aggregate([
+    { $match: { ...orderMatch, 'attribution.source': { $exists: true, $ne: '' } } },
+    {
+      $group: {
+        _id: { source: '$attribution.source', campaign: '$attribution.campaign', reelId: '$attribution.reelId' },
+        orders: { $sum: 1 },
+        revenue: { $sum: '$finalAmount' },
+      },
+    },
+    { $sort: { revenue: -1 } },
+    { $limit: 20 },
+  ]);
+
+  res.json({
+    range: req.query.range || '30d',
+    events: byName,
+    sources: sources.map((row) => ({ source: row._id, count: row.count })),
+    campaigns: campaigns.map((row) => ({
+      source: row._id.source || '',
+      campaign: row._id.campaign || '',
+      reelId: row._id.reelId || '',
+      events: row.events,
+      productViews: row.productViews,
+      addToCart: row.addToCart,
+      purchases: row.purchases,
+    })),
+    attributedSales: attributedOrders.map((row) => ({
+      source: row._id.source || '',
+      campaign: row._id.campaign || '',
+      reelId: row._id.reelId || '',
+      orders: row.orders,
+      revenue: Math.round(Number(row.revenue || 0) * 100) / 100,
+    })),
+    note: 'Counts are from events and orders stored by this app. Instagram view counts are not imported.',
+  });
+});
+
+function daysAgo(range) {
+  const days = { today: 1, '7d': 7, '30d': 30, '90d': 90 }[String(range || '30d')];
+  if (!days) return null;
+  const date = new Date();
+  if (range === 'today') date.setHours(0, 0, 0, 0);
+  else date.setDate(date.getDate() - days);
+  return date;
+}
