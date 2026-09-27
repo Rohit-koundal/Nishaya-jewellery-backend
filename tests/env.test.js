@@ -120,6 +120,7 @@ test('server keeps local owner demo loopback-only and hosted operation public', 
         './config/localOwnerDemo': require('../config/localOwnerDemo'),
         mongoose: { connection: { readyState: 0 } },
         './queues/reelImport.queue': {}, './services/reelImportProgress.service': {},
+        './services/selfKeepAliveService': { startSelfKeepAlive: () => () => {} },
       };
       vm.runInNewContext(source, {
         __dirname: path.join(__dirname, '..'), console: { log() {}, warn() {}, error: reject },

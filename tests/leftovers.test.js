@@ -49,6 +49,21 @@ test('readiness fails while a required tenant index migration is incomplete', as
   }
 });
 
+test('liveness stays independent of readiness and requires no licence or user session', async () => {
+  const app = require('../app');
+  app.locals.tenantIndexesReady = false;
+  try {
+    const probe = 'dfbdd383-fb6e-4bcd-8a82-7a39a2e54696';
+    const live = await request(`/health/live?probe=${probe}`);
+    assert.equal(live.status, 200);
+    assert.equal(live.data, `nishaya-api-alive:${probe}`);
+    assert.match(live.headers.get('cache-control'), /no-store/);
+    assert.equal((await request('/health')).status, 503);
+  } finally {
+    app.locals.tenantIndexesReady = true;
+  }
+});
+
 test('private APIs are not cached and unconfigured Render origins are not trusted', async () => {
   const privateResponse = await request('/api/auth/me');
   assert.equal(privateResponse.status, 401);

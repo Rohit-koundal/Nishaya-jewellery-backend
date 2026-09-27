@@ -142,13 +142,25 @@ async function settled(label, work, fallback, warnings) {
 
 exports.getMobileHome = asyncHandler(async (req, res) => {
   const warnings = [];
-  const [activeTheme, settings] = await Promise.all([
-    settled('configuration', () => WebsiteTheme.findOne({ isActive: true, publishedConfig: { $exists: true, $ne: null } }).select('publishedConfig').lean(), null, warnings),
-    settled('settings', () => Settings.findOne(req.tenantFilter || {}).lean(), {}, warnings),
-  ]);
-  const configured = configuredIds(req, activeTheme);
+  // Only explicitly selected products depend on the theme configuration.
+  // Start all other reads together instead of waiting on three serial batches.
+  const configuredPromise = settled('configuration', () => WebsiteTheme.findOne({ isActive: true, publishedConfig: { $exists: true, $ne: null } }).select('publishedConfig').lean(), null, warnings)
+    .then((theme) => configuredIds(req, theme));
+  const settingsPromise = settled('settings', () => Settings.findOne(req.tenantFilter || {}).lean(), {}, warnings);
+  const categoriesPromise = settled('categories', async () => visibleCategories(await Category.find(andFilter({}, req.tenantFilter))
+    .select('_id name slug image parent level displayOrder isActive isArchived').sort('level displayOrder name').lean()), [], warnings);
+  const bannersPromise = settled('banners', async () => {
+    const now = new Date();
+    const live = andFilter({
+      isActive: true, isArchived: { $ne: true },
+      $and: [
+        { $or: [{ startsAt: { $exists: false } }, { startsAt: null }, { startsAt: { $lte: now } }] },
+        { $or: [{ endsAt: { $exists: false } }, { endsAt: null }, { endsAt: { $gte: now } }] },
+      ],
+    }, req.tenantFilter);
+    return (await Banner.find(live).sort({ position: 1, displayOrder: 1, createdAt: -1 }).limit(BANNER_LIMIT).lean()).map(publicBanner);
+  }, [], warnings);
   const recentIds = cleanObjectIds(String(req.query.recent || '').split(','), SECTION_LIMIT);
-  const allSelectedIds = cleanObjectIds([...Object.values(configured.sectionIds).flat(), ...configured.blockProductIds, ...recentIds], 100);
   const textFilter = (terms) => ({ $or: [
     { name: { $regex: terms, $options: 'i' } },
     { subCategory: { $regex: terms, $options: 'i' } },
@@ -159,7 +171,11 @@ exports.getMobileHome = asyncHandler(async (req, res) => {
 
   const productJobs = {
     latest: () => loadProducts({}, '-createdAt'),
-    selected: () => allSelectedIds.length ? loadProducts({ _id: { $in: allSelectedIds } }, '-updatedAt', 100) : Promise.resolve([]),
+    selected: async () => {
+      const configured = await configuredPromise;
+      const ids = cleanObjectIds([...Object.values(configured.sectionIds).flat(), ...configured.blockProductIds, ...recentIds], 100);
+      return ids.length ? loadProducts({ _id: { $in: ids } }, '-updatedAt', 100) : [];
+    },
     featured: () => loadProducts({ $or: [{ isFeatured: true }, { showOnHomepage: true }] }, '-updatedAt'),
     trending: () => loadProducts({ showInTrending: true }, '-updatedAt'),
     newArrivals: () => loadProducts({ isNewArrival: true }, '-createdAt'),
@@ -169,9 +185,12 @@ exports.getMobileHome = asyncHandler(async (req, res) => {
     instagram: () => loadProducts({ 'images.0': { $exists: true } }, '-createdAt'),
     recommended: () => loadProducts({ rating: { $gt: 0 } }, '-rating -numReviews -updatedAt'),
   };
-  const productResults = await Promise.all(Object.entries(productJobs).map(async ([key, job]) => [
-    key, await settled(`products.${key}`, job, [], warnings),
-  ]));
+  const [productResults, configured, settings, categoryRows, banners] = await Promise.all([
+    Promise.all(Object.entries(productJobs).map(async ([key, job]) => [
+      key, await settled(`products.${key}`, job, [], warnings),
+    ])),
+    configuredPromise, settingsPromise, categoriesPromise, bannersPromise,
+  ]);
   const rawCollections = Object.fromEntries(productResults);
   const byId = new Map(uniqueProducts(rawCollections).map((product) => [productKey(product), product]));
   rawCollections.recentlyViewed = recentIds.map((id) => byId.get(String(id))).filter(Boolean);
@@ -186,28 +205,10 @@ exports.getMobileHome = asyncHandler(async (req, res) => {
   ]));
   const products = uniqueProducts(serializedCollections);
 
-  const [categories, banners] = await Promise.all([
-    settled('categories', async () => {
-      const base = visibleCategories(await Category.find(andFilter({}, req.tenantFilter))
-        .sort('level displayOrder name').lean());
-      if (!configured.categoryIds.length) return base.slice(0, CATEGORY_LIMIT).map(publicCategory);
-      const selected = base.filter((category) => configured.categoryIds.some((id) => String(id) === String(category._id)));
-      return uniqueById([...selected, ...base]).slice(0, CATEGORY_LIMIT).map(publicCategory);
-    }, [], warnings),
-    settled('banners', async () => {
-      const now = new Date();
-      const live = andFilter({
-        isActive: true, isArchived: { $ne: true },
-        $and: [
-          { $or: [{ startsAt: { $exists: false } }, { startsAt: null }, { startsAt: { $lte: now } }] },
-          { $or: [{ endsAt: { $exists: false } }, { endsAt: null }, { endsAt: { $gte: now } }] },
-        ],
-      }, req.tenantFilter);
-      return (await Banner.find(live).sort({ position: 1, displayOrder: 1, createdAt: -1 }).limit(BANNER_LIMIT).lean()).map(publicBanner);
-    }, [], warnings),
-  ]);
+  const selectedCategories = categoryRows.filter((category) => configured.categoryIds.includes(String(category._id)));
+  const categories = uniqueById([...selectedCategories, ...categoryRows]).slice(0, CATEGORY_LIMIT).map(publicCategory);
 
-  res.setHeader('Cache-Control', 'public, max-age=30, stale-while-revalidate=120');
+  res.setHeader('Cache-Control', warnings.length ? 'no-store' : 'public, max-age=30, stale-while-revalidate=120');
   res.vary('X-Store-Slug');
   res.json({
     products,

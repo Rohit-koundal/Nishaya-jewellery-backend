@@ -50,6 +50,8 @@ app.get('/uploads/:filename', sendImagePlaceholder);
 app.get('/placeholder.jpg', sendImagePlaceholder);
 
 app.get('/', (req, res) => res.json({ message: "Nishaya Jewellery API is running" }));
+const { LIVENESS_PATH, sendLiveness } = require('./utils/livenessProbe');
+app.get(LIVENESS_PATH, sendLiveness);
 app.get('/health', async (req, res) => {
   const dbStates = ['disconnected', 'connected', 'connecting', 'disconnecting'];
   const database = dbStates[mongoose.connection.readyState] || 'unknown';

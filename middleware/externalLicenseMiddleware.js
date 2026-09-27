@@ -52,6 +52,11 @@ async function assertCapacity(status, path, method, req) {
 module.exports = async function externalLicenseMiddleware(req, _res, next) {
   const path = apiPath(req);
   if (shouldSkip(path)) return next();
+  const requiredFeature = FEATURE_ROUTES.find(([pattern]) => pattern.test(path))?.[1];
+  // Ordinary reads have no licence decision to make. Do not make browsing
+  // wait for the control plane (including its database/telemetry/cold start).
+  // Commerce writes and signed-in feature-gated reads still validate below.
+  if (['GET', 'HEAD'].includes(req.method) && !(requiredFeature && req.user)) return next();
   if (isCommerceWrite(req.method, path) && !req.user) return next();
   let status;
   try { status = await licenseStatus(); }
@@ -64,7 +69,6 @@ module.exports = async function externalLicenseMiddleware(req, _res, next) {
   if (isCommerceWrite(req.method, path) && ['EXPIRED', 'SUSPENDED', 'REVOKED'].includes(status.status)) {
     return next(new ApiError('SUBSCRIPTION_REQUIRED', status.status === 'REVOKED' ? 'This installation has been revoked by the platform owner' : 'Renew the store subscription to make changes and accept orders'));
   }
-  const requiredFeature = FEATURE_ROUTES.find(([pattern]) => pattern.test(path))?.[1];
   if (requiredFeature && req.user && !status.features?.includes(requiredFeature)) return next(new ApiError('PLAN_FEATURE_REQUIRED', 'This feature is not included in the current plan'));
   try { await assertCapacity(status, path, req.method, req); return next(); }
   catch (error) { return next(error); }

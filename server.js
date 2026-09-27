@@ -13,11 +13,13 @@ const { isLocalOwnerDemoEnabled } = require('./config/localOwnerDemo');
 const mongoose = require('mongoose');
 const { resumePendingReelImports } = require('./queues/reelImport.queue');
 const { startReelImportWatchdog } = require('./services/reelImportProgress.service');
+const { startSelfKeepAlive } = require('./services/selfKeepAliveService');
 
 async function startServer() {
   const cleanupTasks = [];
   let server;
   let shuttingDown = false;
+  let stopSelfKeepAlive = () => {};
   const shutdown = async (signal, error) => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -29,6 +31,7 @@ async function startServer() {
     }, 10000);
     forceExit.unref();
     try {
+      stopSelfKeepAlive();
       if (server) await new Promise((resolve) => server.close(resolve));
       for (const cleanup of cleanupTasks.reverse()) await cleanup();
       await require('./queues/reelImport.queue').closeReelImportQueue().catch(() => null);
@@ -68,6 +71,7 @@ async function startServer() {
   server = app.listen(PORT, localOwnerDemo ? '127.0.0.1' : '0.0.0.0', () => {
     console.log(`Backend API running on port ${PORT}`);
     if (localOwnerDemo) console.log('Local owner demo login enabled. API accepts connections from this computer only.');
+    if (!shuttingDown) stopSelfKeepAlive = startSelfKeepAlive();
   });
   if (server) {
     server.keepAliveTimeout = Math.max(5000, Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || 65000));

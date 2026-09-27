@@ -368,8 +368,11 @@ exports.getActiveConfig = asyncHandler(async (req, res) => {
   if (cached && Date.now() < cached.expiresAt) {
     return sendPublicConfig(req, res, cached.payload);
   }
-  const active = await WebsiteTheme.findOne({ isActive: true, publishedConfig: { $exists: true, $ne: null } }).sort('-publishedAt').lean();
-  const settings = await Settings.findOne(req.tenantFilter || {}).lean() || {};
+  const [active, settingsRow] = await Promise.all([
+    WebsiteTheme.findOne({ isActive: true, publishedConfig: { $exists: true, $ne: null } }).sort('-publishedAt').lean(),
+    Settings.findOne(req.tenantFilter || {}).lean(),
+  ]);
+  const settings = settingsRow || {};
   const payload = active ? publicPayload(active) : { config: buildInitialConfig(settings), theme: null };
   if (req.store?.storefrontDesign?.publishedConfig) {
     payload.config = mergeClientDesign(payload.config, req.store.storefrontDesign.publishedConfig);
