@@ -19,8 +19,11 @@ function tokenPayload(user) {
 }
 
 function generateToken(user) {
+  // Admin work should not depend on a cross-site refresh cookie every 15
+  // minutes. Use the server-resolved account role, including customer mode.
+  // protect() still checks blocking, role changes and session revocation.
   return jwt.sign(tokenPayload(user), getJwtSecret(), {
-    expiresIn: process.env.JWT_EXPIRES_IN || '15m',
+    expiresIn: user.role === 'admin' ? '24h' : (process.env.JWT_EXPIRES_IN || '15m'),
   });
 }
 

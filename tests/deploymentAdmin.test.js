@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const jwt = require('jsonwebtoken');
 const { request, resetDatabase, startTestEnvironment, stopTestEnvironment, getBaseUrl } = require('./helpers');
 const { createCustomer, createAdmin } = require('./factories');
 const User = require('../models/User');
@@ -30,6 +31,7 @@ async function login(phone, otp = '123456') {
   return request('/api/auth/verify-otp', { method: 'POST', body: { phone, otp } });
 }
 function ok(result) { assert.equal(result.status, 200, JSON.stringify(result.data)); return result.data; }
+function accessLifetime(token) { const claims = jwt.decode(token); return claims.exp - claims.iat; }
 async function ownerLogin(t) {
   process.env.OTP_MODE = 'production'; process.env.SMS_PROVIDER = '2factor';
   const previousKey = process.env.TWOFACTOR_API_KEY; process.env.TWOFACTOR_API_KEY = 'isolated-test-key';
@@ -88,13 +90,69 @@ test('a stale legacy admin access token is revoked on its first protected reques
 
 test('new owner receives the configured email and privileged session only after real-provider OTP verification', async t => {
   const result = await ownerLogin(t);
+  assert.equal(accessLifetime(result.token), 86400);
   assert.equal(result.user.role, 'admin'); assert.equal(result.user.email, ownerEmail);
   assert.equal(result.user.isEmailVerified, false); assert.equal(result.user.systemRole, 'MASTER_OWNER');
   assert.equal(result.user.adminAccessSource, undefined);
   const mode = ok(await request('/api/auth/switch-mode', { method: 'POST', token: result.token, body: { mode: 'admin' } }));
+  assert.equal(accessLifetime(mode.token), 86400);
   assert.equal(mode.user.activeMode, 'admin'); assert.equal(mode.user.systemRole, 'MASTER_OWNER');
   ok(await request('/api/admin/orders/admin/all', { token: mode.token }));
   assert.equal(isMasterOwner({ phone: oldPhone, role: 'admin', activeMode: 'admin', systemRole: 'MASTER_OWNER', isPhoneVerified: true, $locals: { masterAuthenticated: true } }), false);
+});
+
+test('regular admin OTP login, mode switches and cookie refresh all issue 24-hour access', async () => {
+  const phone = '9000000077';
+  process.env.ADMIN_PHONE_NUMBERS = `${ownerPhone},${phone}`;
+  ok(await request('/api/auth/send-otp', { method: 'POST', body: { phone } }));
+  const session = ok(await login(phone));
+  assert.equal(session.user.role, 'admin');
+  assert.equal(session.user.activeMode, 'customer');
+  assert.equal(accessLifetime(session.token), 86400);
+  const mode = ok(await request('/api/auth/switch-mode', { method: 'POST', token: session.token, body: { mode: 'admin' } }));
+  assert.equal(accessLifetime(mode.token), 86400);
+  const refreshed = await request('/api/auth/refresh', {
+    method: 'POST', headers: { Cookie: `samira_refresh_token=${mode.refreshToken}` }, body: {},
+  });
+  const renewed = ok(refreshed);
+  assert.equal(accessLifetime(renewed.token), 86400);
+  assert.equal(renewed.user.activeMode, 'admin');
+  assert.match(refreshed.headers.get('set-cookie'), /HttpOnly/i);
+  ok(await request('/api/admin/orders/admin/all', { token: renewed.token }));
+
+  const customerPhone = '9000000078';
+  ok(await request('/api/auth/send-otp', { method: 'POST', body: { phone: customerPhone } }));
+  const customer = ok(await request('/api/auth/verify-otp', { method: 'POST', body: { phone: customerPhone, otp: '123456', role: 'admin', activeMode: 'admin' } }));
+  assert.equal(customer.user.role, 'customer');
+  assert.equal(accessLifetime(customer.token), 900);
+});
+
+test('an admin access token still works after 23 hours without a refresh cookie, but not after 24 hours', async t => {
+  const { user } = await createAdmin();
+  function tokenIssuedAt(time) {
+    const clock = t.mock.method(Date, 'now', () => time);
+    try { return generateToken(user); } finally { clock.mock.restore(); }
+  }
+  const now = Date.now();
+  const activeToken = tokenIssuedAt(now - 23 * 60 * 60 * 1000);
+  const expiredToken = tokenIssuedAt(now - 25 * 60 * 60 * 1000);
+  ok(await request('/api/auth/me', { token: activeToken }));
+  ok(await request('/api/admin/orders/admin/all', { token: activeToken }));
+  assert.equal((await request('/api/auth/me', { token: expiredToken })).status, 401);
+});
+
+test('logout and blocked accounts reject otherwise valid 24-hour admin access and refresh tokens', async () => {
+  for (const action of ['logout', 'block']) {
+    const { user, token } = await createAdmin();
+    const refreshToken = generateRefreshToken(user);
+    assert.equal(accessLifetime(token), 86400);
+    if (action === 'logout') ok(await request('/api/auth/logout', { method: 'POST', token, body: {} }));
+    else await User.updateOne({ _id: user._id }, { $set: { isBlocked: true } });
+    assert.equal((await request('/api/auth/me', { token })).status, 401);
+    assert.equal((await request('/api/auth/refresh', {
+      method: 'POST', headers: { Cookie: `samira_refresh_token=${refreshToken}` }, body: {},
+    })).status, 401);
+  }
 });
 
 test('configured owner login cannot use the customer mock-OTP path', async () => {
