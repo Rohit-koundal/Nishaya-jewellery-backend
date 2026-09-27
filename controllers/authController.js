@@ -13,6 +13,8 @@ const { listMemberships } = require('../services/storeService');
 const { normalizeIndianMobile } = require('../utils/phoneUtils');
 const { getOwnerDemoProvider, allowsOwnerDemoSession } = require('../config/localOwnerDemo');
 const { clearRefreshCookie, refreshTokenFromRequest, returnRefreshTokenInBody, setRefreshCookie } = require('../utils/authCookies');
+const { getAdminPhones } = require('../config/deploymentAdmin');
+const { reconcileAdminAccess, applyOwnerEmail } = require('../services/deploymentAdminService');
 
 const otpRateLimit = new Map();
 const offlineProfiles = new Map();
@@ -67,7 +69,7 @@ exports.updateProfile = async (req, res) => {
           targetType: 'email',
           target: nextEmail,
         })
-        : Boolean(req.user.isEmailVerified)
+        : Boolean(req.user.isEmailVerified) || verifyProfileChangeToken(req.body.emailVerificationToken, { userId: req.user._id || req.user.id, targetType: 'email', target: nextEmail })
     ) : false;
 
     if (phoneChanged && !verifiedPhone) {
@@ -144,7 +146,7 @@ exports.sendProfileEmailChangeOtp = async (req, res) => {
   try {
     const email = normalizeEmail(req.body.email);
     if (!email) return res.status(400).json({ message: 'Please enter a valid email address' });
-    if (email === String(req.user.email || '').toLowerCase()) return res.status(400).json({ message: 'This email is already on your account' });
+    if (email === String(req.user.email || '').toLowerCase() && req.user.isEmailVerified) return res.status(400).json({ message: 'This email is already verified on your account' });
 
     const existingUser = req.user.offlineSession
       ? null
@@ -273,7 +275,7 @@ exports.refresh = async (req, res) => {
     if (canRefreshOfflineSession(decoded)) {
       user = buildOfflineLoginUser(decoded.phone, { activeMode: decoded.activeMode || 'customer' });
     } else {
-      user = await User.findById(decoded.id).select('-password +masterSessionVersion +authSessionVersion');
+      user = await reconcileAdminAccess(await User.findById(decoded.id).select('-password +masterSessionVersion +authSessionVersion +adminAccessSource'));
       if (!user || user.isBlocked) return res.status(401).json({ message: 'Account unavailable' });
       if (Number(decoded.authSessionVersion || 0) !== Number(user.authSessionVersion || 0)) {
         clearRefreshCookie(res, req);
@@ -323,6 +325,7 @@ function sanitize(user) {
   delete data.password;
   delete data.masterSessionVersion;
   delete data.authSessionVersion;
+  delete data.adminAccessSource;
   data.systemRole = user.$locals?.masterAuthenticated && isOwnerAccount(user) && !user.offlineSession ? 'MASTER_OWNER' : 'USER';
   data.id = String(data._id || data.id);
   return data;
@@ -338,10 +341,6 @@ function issueAuthSession(req, res, user) {
   };
 }
 
-function getAdminPhones() {
-  return String(process.env.ADMIN_PHONE_NUMBERS || '').split(',').map((item) => normalizePhone(item)).filter(Boolean);
-}
-
 async function upsertPhoneLoginUser(phone, { activeMode = 'customer', masterVerified = false, ownerDemoProvider = '' } = {}) {
   const isAdminPhone = getAdminPhones().includes(phone) || masterVerified;
   const ownerVersion = masterVerified ? `${ownerDemoProvider ? `${ownerDemoProvider}:` : ''}${crypto.randomUUID()}` : undefined;
@@ -350,18 +349,21 @@ async function upsertPhoneLoginUser(phone, { activeMode = 'customer', masterVeri
     localOwnerDemo: ownerDemoProvider === 'local-demo',
     hostedOwnerDemo: ownerDemoProvider === 'hosted-demo',
   };
-  let user = await User.findOne({ phone });
+  let user = await reconcileAdminAccess(await User.findOne({ phone }).select('+masterSessionVersion +authSessionVersion +adminAccessSource'));
   if (!user) {
-    user = await User.create({
+    user = new User({
       name: `Nishaya User ${phone.slice(-4)}`,
       phone,
       email: `phone+${phone}@samira.local`,
       isPhoneVerified: true,
       role: isAdminPhone ? 'admin' : 'customer',
+      ...(isAdminPhone ? { adminAccessSource: 'ENV' } : {}),
       availableModes: isAdminPhone ? ['customer', 'admin'] : ['customer'],
       activeMode,
       ...(masterVerified ? { systemRole: 'MASTER_OWNER', masterSessionVersion: ownerVersion } : {}),
     });
+    if (masterVerified) await applyOwnerEmail(user);
+    await user.save();
     if (masterVerified) attachMasterSession(user, ownerClaims);
     return user;
   }
@@ -376,6 +378,7 @@ async function upsertPhoneLoginUser(phone, { activeMode = 'customer', masterVeri
   if (isAdminPhone || user.role === 'admin') {
     user.role = 'admin';
     user.availableModes = ['customer', 'admin'];
+    if (isAdminPhone && user.adminAccessSource !== 'MANUAL') user.adminAccessSource = 'ENV';
   } else {
     user.role = 'customer';
     const modes = new Set(['customer']);
@@ -383,7 +386,7 @@ async function upsertPhoneLoginUser(phone, { activeMode = 'customer', masterVeri
     user.availableModes = [...modes];
   }
   user.activeMode = activeMode;
-  if (masterVerified) { user.systemRole = 'MASTER_OWNER'; user.masterSessionVersion = ownerVersion; }
+  if (masterVerified) { user.systemRole = 'MASTER_OWNER'; user.masterSessionVersion = ownerVersion; await applyOwnerEmail(user); }
   await user.save();
   if (masterVerified) attachMasterSession(user, ownerClaims);
   return user;

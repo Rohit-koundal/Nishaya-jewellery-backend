@@ -25,11 +25,11 @@ function getShippingProvider(name) {
     }
   }
   return {
-    name: 'manual', label: 'Manual courier', mode: 'manual', configured: true, missing: [],
+    name: 'manual', label: 'Self delivery / Manual courier', mode: 'manual', configured: true, missing: [],
     liveBooking: false,
     trackingLookup: false,
     cod: true, reverse: true, rateQuotes: false,
-    note: 'Shipping is manual. Book the parcel with your courier, then paste the real AWB here. Fake tracking numbers are never generated.',
+    note: 'No courier API is required. Choose self delivery or save a real courier AWB from the order details, then post customer-visible delivery updates.',
   };
 }
 

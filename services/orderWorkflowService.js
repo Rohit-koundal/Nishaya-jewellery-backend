@@ -29,15 +29,16 @@ function allowedStatusTransitions(order, shipment) {
   if (!order) return [];
   const current = shipmentOf(order, shipment);
   const manual = !current || !isIntegratedShipment(current);
-  const tracked = Boolean(current?.awb || current?.trackingNumber);
+  const tracked = Boolean(current?.deliveryMode === 'SELF' || current?.awb || current?.trackingNumber);
   const transitions = [];
+  if (order.rto?.status && order.rto.status !== 'NONE') return transitions;
 
   const codVerificationPending = order.paymentMethod === 'COD' && order.codVerification?.required === true && order.codVerification.status !== 'VERIFIED';
   if (order.orderStatus === 'Pending' && isOnlinePaid(order) && !codVerificationPending) transitions.push('Confirmed');
   if (order.orderStatus === 'Confirmed' && isOnlinePaid(order) && order.packageVerification?.status !== 'PENDING') transitions.push('Packed');
   if (order.orderStatus === 'Packed' && manual && tracked) transitions.push('Shipped');
-  if (order.orderStatus === 'Shipped' && manual) transitions.push('Out for Delivery');
-  if (order.orderStatus === 'Out for Delivery' && manual) transitions.push('Delivered');
+  if (order.orderStatus === 'Shipped' && manual && !['EXCEPTION', 'FAILED'].includes(current?.status)) transitions.push('Out for Delivery');
+  if (order.orderStatus === 'Out for Delivery' && manual && !['EXCEPTION', 'FAILED'].includes(current?.status)) transitions.push('Delivered');
   if (canCancelOrder(order, current)) transitions.push('Cancelled');
   return transitions;
 }

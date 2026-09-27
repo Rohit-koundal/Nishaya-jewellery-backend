@@ -33,7 +33,7 @@ exports.details = asyncHandler(async (req, res) => {
   const { order, returnRequest, admin, direction } = await context(req);
   let booking = await delivery.findBooking(order, returnRequest, direction);
   let warning = '';
-  if (req.query.refresh === '1' && booking) {
+  if (req.query.refresh === '1' && booking && !req.manualTracking) {
     try { booking = await delivery.syncBooking(booking, returnRequest ? (direction === 'replacement' ? Shipment.ReplacementShipment : Shipment.ReverseShipment) : Shipment); }
     catch { warning = 'Latest courier updates are unavailable. Showing the last confirmed status.'; }
   }
@@ -56,11 +56,10 @@ exports.details = asyncHandler(async (req, res) => {
     } catch { parcel = null; }
   }
   const data = { shipment: delivery.publicShipment(booking), warning };
-  if (!returnRequest && req.query.refresh === '1') data.order = await Order.findById(order._id).select('orderStatus statusTimeline deliveredAt').lean();
+  if (!returnRequest && req.query.refresh === '1') data.order = await Order.findById(order._id).select('orderStatus statusTimeline deliveredAt deliveryProof rto').lean();
+  if (data.order?.deliveryProof) delete data.order.deliveryProof.deliveryOtpVerified;
   if (admin) Object.assign(data, { readiness: getShippingProvider(booking?.provider || settings.shippingProvider || 'manual'), selectedProvider: getShippingProvider(settings.shippingProvider || 'manual'), providers: getShippingProviders(settings.shippingProvider || 'manual'), parcel, pickupAddress: settings.shippingPickup, reverse: !!returnRequest && direction !== 'replacement', replacement: direction === 'replacement' });
-  else if (data.shipment) {
-    for (const key of ['operation', 'operationStartedAt', 'lastError', 'providerCharge', 'providerRef', 'service', 'pickup', 'exceptionActions']) delete data.shipment[key];
-  }
+  else data.shipment = delivery.customerShipment(data.shipment);
   res.set('Cache-Control', 'private, no-store').json(data);
 });
 exports.action = asyncHandler(async (req, res) => {

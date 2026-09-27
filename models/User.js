@@ -29,6 +29,7 @@ const userSchema = new mongoose.Schema({
   password: String,
   isPhoneVerified: { type: Boolean, default: false },
   role: { type: String, enum: ['customer', 'admin'], default: 'customer' },
+  adminAccessSource: { type: String, enum: ['ENV', 'MANUAL'], select: false },
   systemRole: { type: String, enum: ['USER', 'MASTER_OWNER'], default: 'USER' },
   masterSessionVersion: { type: String, select: false },
   authSessionVersion: { type: Number, default: 0, min: 0, select: false },

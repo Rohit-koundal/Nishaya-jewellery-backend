@@ -122,7 +122,7 @@ test('demo OTP mode issues and reveals the fixed code, and it verifies', async (
 
 test('OTP login promotes only numbers listed in ADMIN_PHONE_NUMBERS', async () => {
   const previous = process.env.ADMIN_PHONE_NUMBERS;
-  process.env.ADMIN_PHONE_NUMBERS = '9812345673';
+  process.env.ADMIN_PHONE_NUMBERS = `${require('../config/masterOwner').MASTER_OWNER_PHONE},9812345673`;
   try {
     await request('/api/auth/send-otp', { method: 'POST', body: { phone: '9812345674' } });
     const nonAdmin = await request('/api/auth/verify-otp', { method: 'POST', body: { phone: '9812345674', otp: '123456' } });
@@ -132,7 +132,7 @@ test('OTP login promotes only numbers listed in ADMIN_PHONE_NUMBERS', async () =
     const admin = await request('/api/auth/verify-otp', { method: 'POST', body: { phone: '9812345673', otp: '123456' } });
     assert.equal(admin.data.user.role, 'admin');
   } finally {
-    process.env.ADMIN_PHONE_NUMBERS = previous;
+    if (previous === undefined) delete process.env.ADMIN_PHONE_NUMBERS; else process.env.ADMIN_PHONE_NUMBERS = previous;
   }
 });
 

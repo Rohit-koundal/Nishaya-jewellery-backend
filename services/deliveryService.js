@@ -25,6 +25,11 @@ function publicShipment(row) {
   for (const key of ['labelPdf', 'pickupAddress', 'destination', 'syncLeaseUntil']) delete data[key];
   return data;
 }
+function customerShipment(row) {
+  const data = publicShipment(row);
+  if (data) for (const key of ['operation', 'operationStartedAt', 'lastError', 'providerCharge', 'providerRef', 'service', 'pickup', 'exceptionActions']) delete data[key];
+  return data;
+}
 async function checkoutShipping({ items, settings, address, paymentMethod, amount }) {
   const integrated = isIntegratedProvider(settings.shippingProvider);
   const parcel = integrated || settings.shippingPricingMode === 'weight' ? packageForItems(items, settings) : null;
@@ -100,6 +105,7 @@ async function createBooking(order, body, returnRequest, direction = 'reverse') 
     if (!ready.liveBooking) throw new ApiError('SHIPPING_UNAVAILABLE', ready.note, { statusCode: 503 });
     const Model = bookingModel(returnRequest, direction), filter = bookingFilter(order, returnRequest);
     let existing = await findBooking(order, returnRequest, direction);
+    if (existing?.provider === 'manual' && (existing.deliveryMode === 'SELF' || existing.awb || existing.trackingNumber)) throw new ApiError('SHIPPING_VALIDATION', 'This order already has a store-managed delivery. Continue its manual workflow instead of booking a second shipment.');
     if (existing?.awb || existing?.bookingState === 'BOOKED') return publicShipment(existing);
     if (existing?.operation || ['BOOKING', 'UNKNOWN', 'CANCELLED'].includes(existing?.bookingState)) throw conflict('This shipment needs reconciliation before another booking. Use Check booking outcome.');
     const slot = pickupSlot(body.date, body.time, body.closeTime);
@@ -328,4 +334,4 @@ function stopDeliveryWorker() {
   if (worker) clearInterval(worker);
   worker = null;
 }
-module.exports = { advanceReturnFromCourier, checkoutShipping, createBooking, schedulePickup, cancelBooking, recordExceptionAction, reconcile, syncBooking, findBooking, publicShipment, withOrderLock, startDeliveryWorker, stopDeliveryWorker, assertBookable };
+module.exports = { advanceReturnFromCourier, checkoutShipping, createBooking, schedulePickup, cancelBooking, recordExceptionAction, reconcile, syncBooking, findBooking, publicShipment, customerShipment, withOrderLock, startDeliveryWorker, stopDeliveryWorker, assertBookable };

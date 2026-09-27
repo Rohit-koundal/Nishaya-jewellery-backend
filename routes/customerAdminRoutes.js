@@ -65,6 +65,7 @@ router.patch('/:userId/promote-admin', masterOnly, validateObjectIdParam('userId
 
   const before = { role: user.role };
   user.role = 'admin';
+  user.adminAccessSource = 'MANUAL';
   user.availableModes = [...new Set([...(user.availableModes || []), 'customer', 'admin'])];
   user.activeMode = 'customer';
   await user.save();
@@ -84,6 +85,7 @@ router.patch('/:userId/demote-admin', masterOnly, validateObjectIdParam('userId'
 
   const before = { role: user.role };
   user.role = 'customer';
+  user.adminAccessSource = undefined;
   user.availableModes = (user.availableModes || []).includes('seller') ? ['customer', 'seller'] : ['customer'];
   user.activeMode = 'customer';
   await user.save();

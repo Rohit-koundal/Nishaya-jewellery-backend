@@ -81,6 +81,8 @@ const orderSchema = new mongoose.Schema({
     deliveredAt: Date,
     deliveryOtpVerified: { type: Boolean, default: false },
     source: { type: String, enum: ['MANUAL', 'COURIER', 'SYSTEM'], default: 'SYSTEM' },
+    receivedBy: { type: String, maxlength: 100 },
+    reference: { type: String, maxlength: 120 },
   },
   fraudProtectionSnapshot: {
     capturedAt: Date,

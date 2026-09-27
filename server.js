@@ -52,6 +52,9 @@ async function startServer() {
   }
 
   await connectDB();
+  if (mongoose.connection.readyState === 1) {
+    await require('./services/deploymentAdminService').reconcileDeploymentAdmins();
+  }
 
   const PORT = process.env.PORT || process.env.SERVER_PORT || 5000;
   const persistentImageStorageConfigured = isR2Configured() || isCloudinaryConfigured();

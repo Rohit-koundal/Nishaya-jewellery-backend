@@ -1,9 +1,9 @@
 const { normalizePhone } = require('../utils/phoneUtils');
 const { ApiError } = require('../utils/apiError');
+const { getOwnerPhone } = require('./deploymentAdmin');
 
 // Deployment-owned identity, not an editable store setting or a secret.
-const MASTER_OWNER_PHONE = '9816978086';
-const isOwnerPhone = (phone) => normalizePhone(phone) === MASTER_OWNER_PHONE;
+const isOwnerPhone = (phone) => Boolean(getOwnerPhone() && normalizePhone(phone) === getOwnerPhone());
 const isOwnerAccount = (user) => Boolean(user && isOwnerPhone(user.phone));
 function isMasterOwner(user) {
   return Boolean(isOwnerAccount(user) && user.systemRole === 'MASTER_OWNER' &&
@@ -35,4 +35,4 @@ function assertMasterOwner(user) {
 function masterOnly(req, res, next) {
   try { assertMasterOwner(req.user); return next(); } catch (error) { return next(error); }
 }
-module.exports = { MASTER_OWNER_PHONE, isOwnerPhone, isOwnerAccount, isMasterOwner, attachMasterSession, assertMasterOwner, masterOnly };
+module.exports = { get MASTER_OWNER_PHONE() { return getOwnerPhone(); }, isOwnerPhone, isOwnerAccount, isMasterOwner, attachMasterSession, assertMasterOwner, masterOnly };

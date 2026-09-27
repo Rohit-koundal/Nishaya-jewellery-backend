@@ -11,7 +11,7 @@ function toShipmentStatus(orderStatus) {
   return null;
 }
 
-async function upsertShipmentForOrder(order, { courierName, trackingNumber, trackingUrl, awb, status, note } = {}) {
+async function upsertShipmentForOrder(order, { courierName, trackingNumber, trackingUrl, awb, status, note, session = null, notify = true } = {}) {
   if (!order) throw notFound('Order not found');
   require('./codVerificationService').assertCodDispatchable(order);
   if (order.paymentMethod === 'COD' && order.codConfirmationStatus === 'PENDING') throw new ApiError('VALIDATION_ERROR', 'Confirm this cash-on-delivery order with the customer before arranging shipment.');
@@ -26,8 +26,8 @@ async function upsertShipmentForOrder(order, { courierName, trackingNumber, trac
   };
 
   let shipment = order.shipment
-    ? await Shipment.findById(order.shipment._id || order.shipment)
-    : await Shipment.findOne({ order: order._id });
+    ? await Shipment.findById(order.shipment._id || order.shipment).session(session)
+    : await Shipment.findOne({ order: order._id }).session(session);
 
   if (shipment?.provider && shipment.provider !== 'manual') throw new ApiError('SHIPPING_VALIDATION', `This shipment is managed by ${shipment.courierName || 'an integrated courier'}. Use courier booking, pickup and tracking actions.`);
   if (!Shipment.SHIPMENT_STATUSES.includes(nextStatus)) throw new ApiError('VALIDATION_ERROR', 'Choose a valid shipment status.');
@@ -38,23 +38,28 @@ async function upsertShipmentForOrder(order, { courierName, trackingNumber, trac
   }
 
   if (!shipment) {
-    shipment = await Shipment.create({
+    shipment = new Shipment({
       order: order._id,
       storeId: order.storeId || undefined,
       provider: 'manual',
       events: [{ status: nextStatus, note: note || 'Shipment created', date: new Date() }],
       ...payload,
+      manualUpdatedAt: new Date(),
     });
-    order.shipment = shipment._id;
-    await order.save();
+    await shipment.save({ session });
   } else {
     Object.assign(shipment, Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== undefined)));
     if (!shipment.storeId && order.storeId) shipment.storeId = order.storeId;
     shipment.events.push({ status: nextStatus, note: note || `Status set to ${nextStatus}`, date: new Date() });
-    await shipment.save();
+    shipment.manualUpdatedAt = new Date();
+    await shipment.save({ session });
+  }
+  if (String(order.shipment?._id || order.shipment || '') !== String(shipment._id)) {
+    order.shipment = shipment._id;
+    await order.save({ session });
   }
 
-  if (['SHIPPED', 'IN_TRANSIT', 'OUT_FOR_DELIVERY'].includes(nextStatus)) {
+  if (notify && ['SHIPPED', 'IN_TRANSIT', 'OUT_FOR_DELIVERY'].includes(nextStatus)) {
     notifyLater({
       userId: order.user,
       storeId: order.storeId,

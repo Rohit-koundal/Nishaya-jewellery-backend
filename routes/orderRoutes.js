@@ -11,6 +11,8 @@ const codOtpVerifyLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, stand
 router.post('/evidence/uploads', protect, adminOnly, evidenceUploadLimiter, fraud.evidenceUploadMiddleware, fraud.uploadEvidence);
 router.get('/item-verification/:uniqueItemId', protect, adminOnly, fraud.verifyItemIdentity);
 router.get('/:id/delivery', protect, delivery.details);
+// Stored customer tracking is a core order feature, not courier automation.
+router.get('/:id/tracking', protect, (req, _res, next) => { req.manualTracking = true; next(); }, delivery.details);
 router.get('/:id/delivery/label', protect, adminOnly, delivery.label);
 router.post('/:id/delivery/:action', protect, adminOnly, delivery.action);
 router.post('/', protect, order.createOrder);

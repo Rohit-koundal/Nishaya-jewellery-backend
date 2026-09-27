@@ -8,6 +8,7 @@ const { createCustomer } = require('./factories');
 const { verifyOtpHash, verifyTargetOtp } = require('../services/otpService');
 const { sendOrderOtp, verifyOrderOtp } = require('../services/codVerificationService');
 const { assertClientHandoverReady } = require('../services/clientHandoverService');
+const { MASTER_OWNER_PHONE } = require('../config/masterOwner');
 
 const providers = {
   twilio: { env: { SMS_ACCOUNT_SID: 'AC-test', SMS_AUTH_TOKEN: 'test-token', SMS_SENDER_ID: '+15005550006' }, reply: { sid: 'SM-test', status: 'queued' } },
@@ -57,7 +58,7 @@ function mockDelivery(t, name) {
 }
 
 for (const name of Object.keys(providers)) {
-  for (const [role, phone] of [['owner', '9816978086'], ['customer', '9876543210']]) {
+  for (const [role, phone] of [['owner', MASTER_OWNER_PHONE], ['customer', '9876543210']]) {
     test(`${name}: ${role} delivery recovery, cooldown and single-use login survive a provider switch`, async t => {
       const delivery = mockDelivery(t, name);
       const headers = { 'X-Forwarded-For': `192.0.2.${Object.keys(providers).indexOf(name) + 1}` };

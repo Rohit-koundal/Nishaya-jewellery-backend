@@ -68,6 +68,7 @@ function publicCustomerOrder(order) {
   delete value.fraudProtectionSnapshot;
   if (value.codVerification) value.codVerification = publicVerification(value.codVerification);
   if (value.deliveryProof) delete value.deliveryProof.deliveryOtpVerified;
+  if (value.shipment && typeof value.shipment === 'object' && value.shipment.provider) value.shipment = require('../services/deliveryService').customerShipment(value.shipment);
   value.orderItems = (value.orderItems || []).map(item => { const copy = { ...item }; delete copy.uniqueItemIds; return copy; });
   return value;
 }
@@ -357,13 +358,14 @@ exports.getOrder = asyncHandler(async (req, res) => {
   await syncPaidOnlineOrderStatus(order);
   if (!managerRequest(req)) return res.json(publicCustomerOrder(order));
   const ReturnExchange = require('../models/ReturnExchange');
-  const [returnRequests, customerRisk] = await Promise.all([
+  const [returnRequests, customerRisk, deliverySettings] = await Promise.all([
     ReturnExchange.find(andFilter({ order: order._id }, req.tenantFilter)).populate('product', 'name images sku').sort('-createdAt').lean(),
     refreshCustomerRisk({ storeId: order.storeId, userId: order.user?._id || order.user }),
+    getStoreSettings(req.tenantFilter || {}),
   ]);
   const hasOpenReturn = returnRequests.some(item => !['Rejected', 'Refunded', 'Exchanged', 'Closed'].includes(item.status));
   const canRecordRefund = returnRequests.some(item => item.status === 'Refunded' || item.resolutionStatus === 'Refunded');
-  res.json({ ...decorateOrder(order, { hasOpenReturn, canRecordRefund }), returnRequests, customerRisk });
+  res.json({ ...decorateOrder(order, { hasOpenReturn, canRecordRefund }), returnRequests, customerRisk, deliveryProvider: deliverySettings.shippingProvider || 'manual' });
 });
 
 exports.adminOrders = asyncHandler(async (req, res) => {
@@ -378,7 +380,7 @@ exports.adminOrders = asyncHandler(async (req, res) => {
   }
   const sort = { newest: { createdAt: -1, _id: -1 }, oldest: { createdAt: 1, _id: 1 }, dispatch_sla: { createdAt: 1, _id: 1 }, amount_high: { finalAmount: -1, createdAt: -1 }, amount_low: { finalAmount: 1, createdAt: -1 } }[req.query.sort || 'newest'];
   if (!sort) throw new ApiError('VALIDATION_ERROR', 'Choose a valid order sort.');
-  const finder = () => Order.find(filter).populate('user', 'name email phone').populate('shipment', 'provider courierName status awb trackingNumber bookingState expectedDeliveryAt labelAvailable pickup operation').sort(sort);
+  const finder = () => Order.find(filter).populate('user', 'name email phone').populate('shipment', 'provider deliveryMode courierName status awb trackingNumber bookingState expectedDeliveryAt labelAvailable pickup operation').sort(sort);
   if (wantsPagination(req.query)) {
     const { page, limit, skip } = readPagination(req.query, { defaultLimit: 24, maxLimit: 100 });
     const [items, total] = await Promise.all([
@@ -471,63 +473,82 @@ exports.updateOrderStatus = asyncHandler(async (req, res) => {
     if (!canCancelOrder(order, shipment)) throw new ApiError('ORDER_NOT_CANCELLABLE', 'This order is already with the courier or completed. Use the return/RTO workflow instead of restoring stock through cancellation.');
     return res.json(decorateOrder(await cancelOrderInternal(order, { req, actor: req.user, note: note || 'Cancelled by staff', reasonCode: optionalString(req.body?.reasonCode, 'reasonCode', { max: 80 }) || 'ADMIN_CANCELLATION', comment: note, expectedRevision })));
   }
-  if (orderStatus === 'Packed' && order.fraudProtectionSnapshot?.capturedAt && order.packageVerification?.status === 'PENDING') {
-    throw new ApiError('PACKING_VERIFICATION_REQUIRED', 'Complete product and packing verification before marking this order packed.', { statusCode: 409 });
-  }
-  assertCodDispatchable(order);
-  const transition = assertOrderTransition(order, orderStatus, shipment);
-  if (!transition.changed) return res.json(decorateOrder(order));
-  const before = { orderStatus: order.orderStatus, codConfirmationStatus: order.codConfirmationStatus };
-  const now = new Date();
-  const set = { orderStatus };
-  if (order.paymentMethod === 'COD' && order.codConfirmationStatus === 'PENDING' && order.codVerification?.required !== true && orderStatus === 'Confirmed') set.codConfirmationStatus = 'CONFIRMED';
-  if (orderStatus === 'Delivered') {
-    set.deliveredAt = order.deliveredAt || now;
-    set.deliveryProof = { trackingNumber: shipment?.trackingNumber || shipment?.awb || '', courierName: shipment?.courierName || shipment?.provider || '', deliveredAt: order.deliveredAt || now, deliveryOtpVerified: Boolean(req.body?.deliveryOtpVerified), source: shipment?.provider && shipment.provider !== 'manual' ? 'COURIER' : 'MANUAL' };
-  }
-  const updated = await Order.findOneAndUpdate(andFilter({
-    _id: order._id,
-    orderStatus: order.orderStatus,
-    ...revisionFilter(expectedRevision),
-  }, req.tenantFilter), {
-    $set: set,
-    $inc: { revision: 1 },
-    $push: { statusTimeline: { status: orderStatus, date: now, note: note || `Marked ${orderStatus} by staff` } },
-  }, { new: true });
-  if (!updated) throw new ApiError('ORDER_CHANGED', 'This order changed in another session. Reload it before continuing.', { statusCode: 409 });
-
-  logAudit({ req, action: 'ORDER_STATUS_UPDATE', entityType: 'Order', entityId: updated._id, storeId: updated.storeId, before, after: { orderStatus: updated.orderStatus, codConfirmationStatus: updated.codConfirmationStatus }, summary: note || `Order moved to ${orderStatus}` });
-
-  if (toShipmentStatus(orderStatus)) {
-    await upsertShipmentForOrder(updated, { status: toShipmentStatus(orderStatus), note: note || `Order marked ${orderStatus}` }).catch(() => null);
-  }
-  if (['Shipped', 'Delivered'].includes(orderStatus)) {
-    await InventoryItem.updateMany(andFilter({ order: updated._id }, req.tenantFilter), { $set: { status: orderStatus === 'Delivered' ? 'DELIVERED' : 'SHIPPED', [orderStatus === 'Delivered' ? 'deliveredAt' : 'shippedAt']: now } }).catch(() => null);
-  }
-
-  if (orderStatus === 'Delivered') {
-    notifyLater({
-      userId: updated.user,
-      storeId: updated.storeId,
-      event: 'ORDER_DELIVERED',
-      title: 'Order delivered',
-      message: 'Your order has been delivered. You can now rate products or request a return.',
-      metadata: { orderId: String(updated._id) },
+  return require('../services/deliveryService').withOrderLock(order._id, async () => {
+    if (orderStatus === 'Packed' && order.fraudProtectionSnapshot?.capturedAt && order.packageVerification?.status === 'PENDING') {
+      throw new ApiError('PACKING_VERIFICATION_REQUIRED', 'Complete product and packing verification before marking this order packed.', { statusCode: 409 });
+    }
+    assertCodDispatchable(order);
+    const transition = assertOrderTransition(order, orderStatus, shipment);
+    if (!transition.changed) return decorateOrder(order);
+    const before = { orderStatus: order.orderStatus, codConfirmationStatus: order.codConfirmationStatus };
+    const now = new Date();
+    const set = { orderStatus };
+    if (order.paymentMethod === 'COD' && order.codConfirmationStatus === 'PENDING' && order.codVerification?.required !== true && orderStatus === 'Confirmed') set.codConfirmationStatus = 'CONFIRMED';
+    if (orderStatus === 'Delivered') {
+      const receivedBy = optionalString(req.body?.receivedBy, 'Recipient name', { max: 100 });
+      const reference = optionalString(req.body?.deliveryReference, 'Delivery proof reference', { max: 120 });
+      if (shipment?.deliveryMode === 'SELF' && !receivedBy) throw new ApiError('VALIDATION_ERROR', 'Enter who received the parcel before confirming self delivery.');
+      set.deliveredAt = order.deliveredAt || now;
+      set.deliveryProof = { trackingNumber: shipment?.trackingNumber || shipment?.awb || '', courierName: shipment?.courierName || shipment?.provider || '', deliveredAt: order.deliveredAt || now, deliveryOtpVerified: false, receivedBy, reference, source: shipment?.provider && shipment.provider !== 'manual' ? 'COURIER' : 'MANUAL' };
+    }
+    const updated = await runInTransaction(async session => {
+      const result = await Order.findOneAndUpdate(andFilter({
+        _id: order._id,
+        orderStatus: order.orderStatus,
+        ...revisionFilter(expectedRevision),
+      }, req.tenantFilter), {
+        $set: set,
+        $inc: { revision: 1 },
+        $push: { statusTimeline: { status: orderStatus, date: now, note: note || `Marked ${orderStatus} by staff` } },
+      }, { new: true, session });
+      if (!result) throw new ApiError('ORDER_CHANGED', 'This order changed in another session. Reload it before continuing.', { statusCode: 409 });
+      if (toShipmentStatus(orderStatus) && (!shipment?.provider || shipment.provider === 'manual')) {
+        try { await upsertShipmentForOrder(result, { status: toShipmentStatus(orderStatus), note: note || `Order marked ${orderStatus}`, session, notify: false }); }
+        catch (error) {
+          if (!session) await Order.updateOne({ _id: order._id, revision: expectedRevision + 1, orderStatus }, { $set: {
+            orderStatus: order.orderStatus, revision: expectedRevision, shipment: order.shipment || null,
+            deliveredAt: order.deliveredAt || null, deliveryProof: order.deliveryProof,
+            codConfirmationStatus: order.codConfirmationStatus, statusTimeline: order.statusTimeline,
+          } });
+          throw error;
+        }
+      }
+      return result;
     });
-    const firstProductId = (updated.orderItems || []).map((item) => item.product).find(Boolean);
-    notifyLater({
-      userId: updated.user,
-      storeId: updated.storeId,
-      event: 'REVIEW_REQUEST',
-      title: 'How was your order?',
-      message: 'Your feedback helps other shoppers choose with confidence. Rate the products you received.',
-      metadata: { orderId: String(updated._id), productId: firstProductId ? String(firstProductId) : undefined },
-      deliverAfter: new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000),
-    });
-  }
 
-  const populated = await Order.findById(updated._id).populate('shipment', 'provider courierName status awb trackingNumber bookingState expectedDeliveryAt');
-  res.json(decorateOrder(populated));
+    logAudit({ req, action: 'ORDER_STATUS_UPDATE', entityType: 'Order', entityId: updated._id, storeId: updated.storeId, before, after: { orderStatus: updated.orderStatus, codConfirmationStatus: updated.codConfirmationStatus }, summary: note || `Order moved to ${orderStatus}` });
+
+    if (['Shipped', 'Out for Delivery'].includes(orderStatus)) {
+      notifyLater({ userId: updated.user, storeId: updated.storeId, event: orderStatus === 'Shipped' ? 'ORDER_SHIPPED' : 'ORDER_OUT_FOR_DELIVERY', title: orderStatus === 'Shipped' ? 'Your order is on the way' : 'Out for delivery', message: note || `Your order is ${orderStatus.toLowerCase()}.`, metadata: { orderId: String(updated._id) } });
+    }
+    if (['Shipped', 'Delivered'].includes(orderStatus)) {
+      await InventoryItem.updateMany(andFilter({ order: updated._id }, req.tenantFilter), { $set: { status: orderStatus === 'Delivered' ? 'DELIVERED' : 'SHIPPED', [orderStatus === 'Delivered' ? 'deliveredAt' : 'shippedAt']: now } }).catch(() => null);
+    }
+
+    if (orderStatus === 'Delivered') {
+      notifyLater({
+        userId: updated.user,
+        storeId: updated.storeId,
+        event: 'ORDER_DELIVERED',
+        title: 'Order delivered',
+        message: 'Your order has been delivered. You can now rate products or request a return.',
+        metadata: { orderId: String(updated._id) },
+      });
+      const firstProductId = (updated.orderItems || []).map((item) => item.product).find(Boolean);
+      notifyLater({
+        userId: updated.user,
+        storeId: updated.storeId,
+        event: 'REVIEW_REQUEST',
+        title: 'How was your order?',
+        message: 'Your feedback helps other shoppers choose with confidence. Rate the products you received.',
+        metadata: { orderId: String(updated._id), productId: firstProductId ? String(firstProductId) : undefined },
+        deliverAfter: new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000),
+      });
+    }
+
+    const populated = await Order.findById(updated._id).populate('shipment', 'provider deliveryMode courierName status awb trackingNumber bookingState expectedDeliveryAt');
+    return decorateOrder(populated);
+  }).then(data => res.json(data));
 });
 
 exports.updatePaymentStatus = asyncHandler(async (req, res) => {
@@ -770,49 +791,52 @@ exports.inspectRto = asyncHandler(async (req, res) => {
   const notes = requireString(req.body?.notes, 'inspection notes', { max: 1000 });
   let order = await Order.findOne(andFilter({ _id: req.params.id }, req.tenantFilter));
   if (!order) throw notFound('Order not found');
-  if (!['RECEIVED', 'QC_PENDING'].includes(order.rto?.status)) throw new ApiError('ORDER_TRANSITION_INVALID', 'This order is not waiting for an RTO inspection.', { statusCode: 409 });
-  const expectedRevision = assertCurrentRevision(order, req.body?.revision);
-  const items = (order.orderItems || []).map(item => ({
-    product: item.product,
-    variantId: item.variantId,
-    quantity: Math.max(0, Number(item.quantity || 0) - Number(item.cancelledQuantity || 0)),
-  })).filter(item => item.quantity > 0);
-  const expectedQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
-  const receivedQuantity = Number(req.body?.receivedQuantity ?? (disposition === 'MISSING' ? 0 : expectedQuantity));
-  if (!Number.isInteger(receivedQuantity) || receivedQuantity < 0 || receivedQuantity > expectedQuantity) throw new ApiError('VALIDATION_ERROR', `Received quantity must be between 0 and ${expectedQuantity}.`);
-  if (disposition !== 'MISSING' && receivedQuantity !== expectedQuantity) throw new ApiError('VALIDATION_ERROR', 'Inspect each returned unit before completing RTO. Use Missing only when the parcel or all products are unavailable.');
-  const currentSettings = await getStoreSettings(req.tenantFilter || (order.storeId ? { storeId: order.storeId } : {}));
-  const policy = returnPolicySettings(order, currentSettings);
-  const remainingPaidAmount = Math.max(0, Number(order.finalAmount || 0) - Number(order.refundedAmount || 0));
-  const refundDeduction = req.body?.waiveRefundDeduction === true ? 0 : Math.min(remainingPaidAmount, Math.max(0, Number(policy.rtoRefundDeduction || 0)));
-  const rtoRefundAmount = Math.max(0, Math.round((remainingPaidAmount - refundDeduction) * 100) / 100);
+  return require('../services/deliveryService').withOrderLock(order._id, async freshOrder => {
+    order = freshOrder;
+    if (!['RECEIVED', 'QC_PENDING'].includes(order.rto?.status)) throw new ApiError('ORDER_TRANSITION_INVALID', 'This order is not waiting for an RTO inspection.', { statusCode: 409 });
+    const expectedRevision = assertCurrentRevision(order, req.body?.revision);
+    const items = (order.orderItems || []).map(item => ({
+      product: item.product,
+      variantId: item.variantId,
+      quantity: Math.max(0, Number(item.quantity || 0) - Number(item.cancelledQuantity || 0)),
+    })).filter(item => item.quantity > 0);
+    const expectedQuantity = items.reduce((sum, item) => sum + item.quantity, 0);
+    const receivedQuantity = Number(req.body?.receivedQuantity ?? (disposition === 'MISSING' ? 0 : expectedQuantity));
+    if (!Number.isInteger(receivedQuantity) || receivedQuantity < 0 || receivedQuantity > expectedQuantity) throw new ApiError('VALIDATION_ERROR', `Received quantity must be between 0 and ${expectedQuantity}.`);
+    if (disposition !== 'MISSING' && receivedQuantity !== expectedQuantity) throw new ApiError('VALIDATION_ERROR', 'Inspect each returned unit before completing RTO. Use Missing only when the parcel or all products are unavailable.');
+    const currentSettings = await getStoreSettings(req.tenantFilter || (order.storeId ? { storeId: order.storeId } : {}));
+    const policy = returnPolicySettings(order, currentSettings);
+    const remainingPaidAmount = Math.max(0, Number(order.finalAmount || 0) - Number(order.refundedAmount || 0));
+    const refundDeduction = req.body?.waiveRefundDeduction === true ? 0 : Math.min(remainingPaidAmount, Math.max(0, Number(policy.rtoRefundDeduction || 0)));
+    const rtoRefundAmount = Math.max(0, Math.round((remainingPaidAmount - refundDeduction) * 100) / 100);
 
-  if (disposition !== 'MISSING') {
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index];
-      await inventoryService.applyInventoryAdjustment({
-        productId: item.product, variantId: item.variantId, mode: 'ADD',
-        bucket: disposition === 'RESTOCK' ? 'SELLABLE' : disposition,
-        quantity: item.quantity,
-        reasonCode: disposition === 'DAMAGED' ? 'DAMAGED' : 'CUSTOMER_RETURN',
-        reason: `RTO parcel inspected as ${disposition.toLowerCase()}`,
-        note: notes, reference: `RTO ${order._id}`,
-        idempotencyKey: `rto-disposition:${order._id}:${index}:${disposition}`,
-        tenantFilter: req.tenantFilter, userId: req.user._id,
-      });
+    if (disposition !== 'MISSING') {
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index];
+        await inventoryService.applyInventoryAdjustment({
+          productId: item.product, variantId: item.variantId, mode: 'ADD',
+          bucket: disposition === 'RESTOCK' ? 'SELLABLE' : disposition,
+          quantity: item.quantity,
+          reasonCode: disposition === 'DAMAGED' ? 'DAMAGED' : 'CUSTOMER_RETURN',
+          reason: `RTO parcel inspected as ${disposition.toLowerCase()}`,
+          note: notes, reference: `RTO ${order._id}`,
+          idempotencyKey: `rto-disposition:${order._id}:${index}:${disposition}`,
+          tenantFilter: req.tenantFilter, userId: req.user._id,
+        });
+      }
     }
-  }
-  const statusForDisposition = { RESTOCK: 'RESTOCKED', QUARANTINE: 'QUARANTINED', DAMAGED: 'DAMAGED', MISSING: 'MISSING' }[disposition];
-  order = await Order.findOneAndUpdate(andFilter({ _id: order._id, 'rto.inventoryRecorded': { $ne: true }, ...revisionFilter(expectedRevision) }, req.tenantFilter), { $set: { 'rto.status': statusForDisposition, 'rto.disposition': disposition, 'rto.receivedQuantity': receivedQuantity, 'rto.inspectedAt': new Date(), 'rto.inventoryRecorded': true, 'rto.inventoryRecordedAt': new Date(), 'rto.notes': notes, 'rto.lastRefundError': '', 'rto.refundAmount': order.paymentMethod === 'COD' ? 0 : rtoRefundAmount, 'rto.refundDeduction': order.paymentMethod === 'COD' ? 0 : refundDeduction, 'rto.refundStatus': order.paymentMethod === 'COD' ? 'NOT_REQUIRED' : 'PENDING', ...(disposition === 'RESTOCK' ? { inventoryRestored: true, inventoryRestoredAt: new Date() } : {}) }, $inc: { revision: 1 }, $push: { statusTimeline: { status: `RTO ${statusForDisposition.toLowerCase()}`, note: notes, date: new Date() } } }, { new: true });
-  if (!order) {
-    const current = await Order.findById(req.params.id);
-    if (current?.rto?.inventoryRecorded) return res.json(decorateOrder(current));
-    throw new ApiError('ORDER_CHANGED', 'This order changed during inspection. Reload it before continuing.', { statusCode: 409 });
-  }
-  await logAudit({ req, action: 'ORDER_RTO_INSPECTED', entityType: 'Order', entityId: order._id, storeId: order.storeId, after: { disposition, receivedQuantity, refundStatus: order.rto?.refundStatus, refundAmount: order.rto?.refundAmount, refundDeduction: order.rto?.refundDeduction }, summary: notes });
-  const resolved = await processRtoRefund(order._id);
-  notifyLater({ userId: order.user, storeId: order.storeId, event: 'ORDER_RTO_INSPECTED', title: 'Returned parcel inspected', message: order.paymentMethod === 'COD' ? 'The returned parcel has been inspected and this order is closed.' : 'The returned parcel has been inspected and your prepaid refund is being handled.', metadata: { orderId: String(order._id) } });
-  res.json(decorateOrder(resolved));
+    const statusForDisposition = { RESTOCK: 'RESTOCKED', QUARANTINE: 'QUARANTINED', DAMAGED: 'DAMAGED', MISSING: 'MISSING' }[disposition];
+    order = await Order.findOneAndUpdate(andFilter({ _id: order._id, 'rto.inventoryRecorded': { $ne: true }, ...revisionFilter(expectedRevision) }, req.tenantFilter), { $set: { 'rto.status': statusForDisposition, 'rto.disposition': disposition, 'rto.receivedQuantity': receivedQuantity, 'rto.inspectedAt': new Date(), 'rto.inventoryRecorded': true, 'rto.inventoryRecordedAt': new Date(), 'rto.notes': notes, 'rto.lastRefundError': '', 'rto.refundAmount': order.paymentMethod === 'COD' ? 0 : rtoRefundAmount, 'rto.refundDeduction': order.paymentMethod === 'COD' ? 0 : refundDeduction, 'rto.refundStatus': order.paymentMethod === 'COD' ? 'NOT_REQUIRED' : 'PENDING', ...(disposition === 'RESTOCK' ? { inventoryRestored: true, inventoryRestoredAt: new Date() } : {}) }, $inc: { revision: 1 }, $push: { statusTimeline: { status: `RTO ${statusForDisposition.toLowerCase()}`, note: notes, date: new Date() } } }, { new: true });
+    if (!order) {
+      const current = await Order.findById(req.params.id);
+      if (current?.rto?.inventoryRecorded) return decorateOrder(current);
+      throw new ApiError('ORDER_CHANGED', 'This order changed during inspection. Reload it before continuing.', { statusCode: 409 });
+    }
+    await logAudit({ req, action: 'ORDER_RTO_INSPECTED', entityType: 'Order', entityId: order._id, storeId: order.storeId, after: { disposition, receivedQuantity, refundStatus: order.rto?.refundStatus, refundAmount: order.rto?.refundAmount, refundDeduction: order.rto?.refundDeduction }, summary: notes });
+    const resolved = await processRtoRefund(order._id);
+    notifyLater({ userId: order.user, storeId: order.storeId, event: 'ORDER_RTO_INSPECTED', title: 'Returned parcel inspected', message: order.paymentMethod === 'COD' ? 'The returned parcel has been inspected and this order is closed.' : 'The returned parcel has been inspected and your prepaid refund is being handled.', metadata: { orderId: String(order._id) } });
+    return decorateOrder(resolved);
+  }).then(data => res.json(data));
 });
 
 exports.retryRtoRefund = asyncHandler(async (req, res) => {
@@ -920,6 +944,10 @@ async function cancelAfterCourier(order, { req, actor, note, source, reasonCode,
       if (current?.orderStatus !== 'Cancelled') throw new ApiError('ORDER_CHANGED', 'This order changed in another session. Reload it before continuing.', { statusCode: 409 });
       return { changed: false, order: current };
     }
+    if (updated) await require('../models/Shipment').updateOne({ order: order._id, provider: 'manual', status: { $in: ['WAITING', 'READY_TO_SHIP', 'PICKUP_SCHEDULED', 'FAILED'] } }, {
+      $set: { status: 'CANCELLED', manualUpdatedAt: new Date() },
+      $push: { events: { status: 'CANCELLED', note: 'Order cancelled before dispatch.', date: new Date() } },
+    }, { session });
     return { changed: Boolean(updated), order: updated || await Order.findById(order._id).session(session || null) };
   }).then((result) => {
     if (result.changed) logAudit({ req: req || { user: actor }, source, action: 'ORDER_CANCEL', entityType: 'Order', entityId: order._id, before: { orderStatus: order.orderStatus }, after: { orderStatus: 'Cancelled' }, storeId: order.storeId });
@@ -1007,15 +1035,8 @@ exports.updateShipment = asyncHandler(async (req, res) => {
   requireObjectId(req.params.id, 'order id');
   const order = await Order.findOne(andFilter({ _id: req.params.id }, req.tenantFilter));
   if (!order) throw notFound('Order not found');
-  const shipment = await upsertShipmentForOrder(order, {
-    courierName: optionalString(req.body?.courierName, 'courierName', { max: 80 }) || undefined,
-    trackingNumber: optionalString(req.body?.trackingNumber, 'trackingNumber', { max: 80 }) || undefined,
-    trackingUrl: optionalString(req.body?.trackingUrl, 'trackingUrl', { max: 500 }) || undefined,
-    awb: optionalString(req.body?.awb, 'awb', { max: 80 }) || undefined,
-    status: req.body?.status,
-    note: optionalString(req.body?.note, 'note', { max: 300 }) || 'Shipment updated by admin',
-  });
-  logAudit({ req, action: 'SHIPMENT_UPDATE', entityType: 'Order', entityId: order._id, storeId: order.storeId, after: { status: shipment.status, courierName: shipment.courierName, trackingNumber: shipment.trackingNumber } });
+  const shipment = await require('../services/manualDeliveryService').saveManualDelivery(order, req.body || {});
+  logAudit({ req, action: 'SHIPMENT_UPDATE', entityType: 'Order', entityId: order._id, storeId: order.storeId, after: { status: shipment.status, deliveryMode: shipment.deliveryMode, courierName: shipment.courierName, trackingNumber: shipment.trackingNumber, expectedDeliveryAt: shipment.expectedDeliveryAt, update: req.body?.event || 'DETAILS' }, summary: req.body?.note });
   res.json(shipment);
 });
 

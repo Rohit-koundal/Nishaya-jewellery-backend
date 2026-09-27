@@ -9,12 +9,13 @@ const { logAudit, hasAuditWriteFailures } = require('../services/auditService');
 const { buildAuditQuery, scopeFor, auditView } = require('../services/auditQuery');
 const { auditAdminRequests } = require('../middleware/auditMiddleware');
 const controller = require('../controllers/auditController');
+const { MASTER_OWNER_PHONE } = require('../config/masterOwner');
 
 const ID = '0123456789abcdef01234567';
 const STORE = new mongoose.Types.ObjectId('0123456789abcdef01234568');
 const NOW = new Date('2026-09-05T12:00:00.000Z');
 const admin = () => ({ user: { _id: ID, name: 'Store manager', role: 'admin', activeMode: 'admin' }, query: {}, baseUrl: '/api/admin/audit-logs' });
-const owner = () => ({ ...admin(), user: { ...admin().user, phone: '9816978086', systemRole: 'MASTER_OWNER', isPhoneVerified: true, $locals: { masterAuthenticated: true } } });
+const owner = () => ({ ...admin(), user: { ...admin().user, phone: MASTER_OWNER_PHONE, systemRole: 'MASTER_OWNER', isPhoneVerified: true, $locals: { masterAuthenticated: true } } });
 const seller = () => ({ ...admin(), baseUrl: '/api/seller', store: { _id: STORE }, storeMember: { role: 'STAFF' }, tenantFilter: { storeId: STORE } });
 function response() { return { setHeader() {}, json(value) { this.body = value; return this; } }; }
 function queryResult(value, calls = []) {

@@ -5,6 +5,7 @@ const User = require('../models/User');
 const { getJwtRefreshSecret, getJwtSecret } = require('../config/env');
 const { protect } = require('../middleware/authMiddleware');
 const { refresh } = require('../controllers/authController');
+const { MASTER_OWNER_PHONE } = require('../config/masterOwner');
 const response = () => ({ statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } });
 const token = (refreshToken = false, extra = {}) => jwt.sign({ id: '0123456789abcdef01234567', ...(refreshToken ? { tokenType: 'refresh' } : {}), ...extra }, refreshToken ? getJwtRefreshSecret() : getJwtSecret());
 
@@ -73,8 +74,8 @@ test('SMS configuration and timeouts return safe, distinct delivery errors', asy
 });
 
 test('failed owner and customer delivery invalidate the OTP and permit retry after credentials are repaired', async (t) => {
-  for (const phone of ['9816978086', '9876543210']) {
-    await t.test(phone === '9816978086' ? 'owner' : 'customer', async (subtest) => {
+  for (const phone of [MASTER_OWNER_PHONE, '9876543210']) {
+    await t.test(phone === MASTER_OWNER_PHONE ? 'owner' : 'customer', async (subtest) => {
       configureSmsTest(subtest);
       const mongoose = require('mongoose');
       const Otp = require('../models/Otp');
@@ -114,7 +115,7 @@ test('failed owner and customer delivery invalidate the OTP and permit retry aft
       assert.equal(retried.body.otpMode, 'production');
       assert.equal(record.isUsed, false);
       assert.equal(retried.body.demoOtp, undefined);
-      if (phone === '9816978086') assert.equal(record.trustedDelivery, true);
+      if (phone === MASTER_OWNER_PHONE) assert.equal(record.trustedDelivery, true);
     });
   }
 });

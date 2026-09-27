@@ -40,6 +40,8 @@ services:
         sync: false
       - key: ADMIN_PHONE_NUMBERS
         sync: false
+      - key: ADMIN_EMAIL
+        sync: false
       # Temporary team-demo login. Disable the owner switch before live use.
       - key: OTP_MODE
         value: demo

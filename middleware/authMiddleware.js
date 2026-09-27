@@ -4,6 +4,9 @@ const mongoose = require('mongoose');
 const User = require('../models/User');
 const { getJwtSecret } = require('../config/env');
 const { allowsOwnerDemoSession } = require('../config/localOwnerDemo');
+const { getAdminPhones } = require('../config/deploymentAdmin');
+const { normalizePhone } = require('../utils/phoneUtils');
+const { reconcileAdminAccess } = require('../services/deploymentAdminService');
 
 async function protect(req, res, next) {
   if (req.user) return next();
@@ -19,7 +22,7 @@ async function protect(req, res, next) {
       req.user = buildOfflineUser(decoded);
       return next();
     }
-    req.user = await User.findById(decoded.id).select('-password +masterSessionVersion +authSessionVersion');
+    req.user = await reconcileAdminAccess(await User.findById(decoded.id).select('-password +masterSessionVersion +authSessionVersion +adminAccessSource'));
     if (!req.user || req.user.isBlocked) return res.status(401).json({ success: false, code: 'UNAUTHORIZED', message: 'Account unavailable' });
     if (Number(decoded.authSessionVersion || 0) !== Number(req.user.authSessionVersion || 0)) {
       return res.status(401).json({ success: false, code: 'UNAUTHORIZED', message: 'This session has ended. Please login again.' });
@@ -42,15 +45,16 @@ function canUseOfflineSession(decoded) {
 }
 
 function buildOfflineUser(decoded) {
+  const admin = getAdminPhones().includes(normalizePhone(decoded.phone));
   const user = {
     _id: decoded.userId || decoded.id,
     id: decoded.userId || decoded.id,
     name: decoded.name || `Nishaya User ${String(decoded.phone || '').slice(-4)}`,
     phone: decoded.phone,
     isPhoneVerified: true,
-    role: decoded.role || 'customer',
-    availableModes: decoded.role === 'admin' ? ['customer', 'admin'] : ['customer'],
-    activeMode: decoded.activeMode || 'customer',
+    role: admin ? 'admin' : 'customer',
+    availableModes: admin ? ['customer', 'admin'] : ['customer'],
+    activeMode: admin && decoded.activeMode === 'admin' ? 'admin' : 'customer',
     isBlocked: false,
     offlineSession: true,
   };
@@ -77,7 +81,7 @@ async function optionalProtect(req, res, next) {
       req.user = buildOfflineUser(decoded);
       return next();
     }
-    const user = await User.findById(decoded.id).select('-password +masterSessionVersion +authSessionVersion');
+    const user = await reconcileAdminAccess(await User.findById(decoded.id).select('-password +masterSessionVersion +authSessionVersion +adminAccessSource'));
     if (user && !user.isBlocked && Number(decoded.authSessionVersion || 0) === Number(user.authSessionVersion || 0)) req.user = attachMasterSession(user, decoded);
   } catch {
     // Invalid tokens are ignored here; the caller is still anonymous.

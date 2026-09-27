@@ -19,7 +19,7 @@ const mongoose = require('mongoose');
 // Tests may deliberately override these after importing the harness. Never
 // inherit production delivery/storage credentials from the caller's shell.
 for (const key of Object.keys(process.env)) {
-  if (/^(MONGO_URI|JWT|OTP|SMS|TWILIO|MSG91|TWOFACTOR|FAST2SMS|BREVO|RAZORPAY|R2_|CLOUDINARY|REDIS|GEMINI|AI_|SOCIAL_|META_|INSTAGRAM|FACEBOOK|SHIPROCKET|SHIPPING_|WHATSAPP|PUSH_|PAYMENTS_|ADMIN_PHONE|MASTER_OWNER)/i.test(key)) delete process.env[key];
+  if (/^(MONGO_URI|JWT|OTP|SMS|TWILIO|MSG91|TWOFACTOR|FAST2SMS|BREVO|RAZORPAY|R2_|CLOUDINARY|REDIS|GEMINI|AI_|SOCIAL_|META_|INSTAGRAM|FACEBOOK|SHIPROCKET|SHIPPING_|WHATSAPP|PUSH_|PAYMENTS_|ADMIN_PHONE|ADMIN_EMAIL|MASTER_OWNER)/i.test(key)) delete process.env[key];
 }
 Object.assign(process.env, {
   NODE_ENV: 'test',
