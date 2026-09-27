@@ -2,6 +2,7 @@ const Configuration = require('../models/MasterConfiguration');
 const Product = require('../models/Product');
 const Store = require('../models/Store');
 const Category = require('../models/Category');
+const { readCategoryHierarchy, categoryPath } = require('./categoryHierarchy');
 const mongoose = require('mongoose');
 const { ATTRIBUTE_TYPES, DEFAULT_STRUCTURE, INDUSTRY_IDS, getIndustryPreset } = require('../config/industryPresets');
 const { assertMasterOwner } = require('../config/masterOwner');
@@ -345,14 +346,22 @@ async function applyProductStructure(payload, existing = {}) {
   const selectedCategoryId = payload.category || existing.category;
   const activeStoreId = payload?.storeId || existing?.storeId;
   const selectedCategory = selectedCategoryId && mongoose.isValidObjectId(selectedCategoryId)
-    ? await Category.findOne({ _id: selectedCategoryId, ...(activeStoreId ? { storeId: activeStoreId } : {}) }).select('definitionKey name').lean()
+    ? await Category.findOne({ _id: selectedCategoryId, ...(activeStoreId ? { storeId: activeStoreId } : {}) }).select('definitionKey name parent').lean()
     : null;
   const requestedSubcategory = String(payload.subCategory ?? existing.subCategory ?? '').trim().toLowerCase();
   const requestedKey = text(payload.categoryDefinitionKey || existing.categoryDefinitionKey || selectedCategory?.definitionKey || selectedCategory?.name || requestedSubcategory, 50).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
-  const categoryDefinition = (structure.categoryDefinitions || []).find((item) => requestedSubcategory && (
+  const legacyDefinition = (structure.categoryDefinitions || []).find((item) => requestedSubcategory && (
     item.key === requestedSubcategory.replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')
     || item.name.toLowerCase() === requestedSubcategory
   )) || (structure.categoryDefinitions || []).find((item) => item.key === requestedKey);
+  const managedPath = selectedCategory?.parent
+    ? categoryPath(selectedCategory, await readCategoryHierarchy(activeStoreId ? { storeId: activeStoreId } : {})).reverse()
+    : [];
+  const managedDefinition = managedPath.map((category) => {
+    const normalizedName = String(category.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    return (structure.categoryDefinitions || []).find((item) => item.key === category.definitionKey || item.key === normalizedName);
+  }).find(Boolean);
+  const categoryDefinition = managedDefinition || legacyDefinition;
   const definitionKey = categoryDefinition?.key || requestedKey;
   const definitions = [...structure.attributes];
   const categoryChain = [];

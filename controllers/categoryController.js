@@ -11,6 +11,8 @@ const { ApiError } = require('../utils/apiError');
 const { logAudit } = require('../services/auditService');
 const { auditSnapshot } = require('../utils/auditData');
 const { isMasterOwner } = require('../config/masterOwner');
+const { visibleCategories, categoryPath } = require('../services/categoryHierarchy');
+const { runInTransaction } = require('../utils/transaction');
 
 const CATEGORY_AUDIT_FIELDS = ['name', 'slug', 'parent', 'level', 'definitionKey', 'description', 'image', 'socialImage', 'metaTitle', 'metaDescription', 'displayOrder', 'isActive', 'isArchived', 'archivedAt'];
 const EDITABLE_FIELDS = ['name', 'slug', 'parent', 'definitionKey', 'description', 'image', 'socialImage', 'metaTitle', 'metaDescription', 'displayOrder', 'isActive'];
@@ -69,11 +71,12 @@ function requestedPayload(body = {}) {
 
 async function categoryImpact(category, req) {
   const categoryId = category._id;
+  const branchIds = [categoryId, ...(await descendantsOf(categoryId, req)).map((item) => item.id)];
   const [productCount, activeProductCount, draftCount, couponCount, childCount] = await Promise.all([
-    Product.countDocuments(scoped(req, { category: categoryId })),
-    Product.countDocuments(scoped(req, { category: categoryId, isArchived: { $ne: true }, isActive: true })),
-    ProductDraft.countDocuments(scoped(req, { category: categoryId })),
-    Coupon.countDocuments(scoped(req, { applicableCategories: categoryId })),
+    Product.countDocuments(scoped(req, { category: { $in: branchIds } })),
+    Product.countDocuments(scoped(req, { category: { $in: branchIds }, isArchived: { $ne: true }, isActive: true })),
+    ProductDraft.countDocuments(scoped(req, { category: { $in: branchIds } })),
+    Coupon.countDocuments(scoped(req, { applicableCategories: { $in: branchIds } })),
     Category.countDocuments(scoped(req, { parent: categoryId })),
   ]);
   return {
@@ -104,12 +107,17 @@ async function enrichCategories(categories, req) {
   const childMap = new Map(children.map((item) => [String(item._id), item.childCount]));
   return categories.map((category) => {
     const data = category.toObject ? category.toObject() : category;
-    const counts = productMap.get(String(data._id)) || {};
+    const branch = categories.filter((item) => categoryPath(item, categories).some((node) => String(node._id) === String(data._id)));
+    const counts = branch.reduce((total, item) => {
+      const row = productMap.get(String(item._id)) || {};
+      return { productCount: total.productCount + Number(row.productCount || 0), activeProductCount: total.activeProductCount + Number(row.activeProductCount || 0), draftCount: total.draftCount + Number(draftMap.get(String(item._id)) || 0) };
+    }, { productCount: 0, activeProductCount: 0, draftCount: 0 });
     return {
       ...data,
       productCount: Number(counts.productCount || 0),
       activeProductCount: Number(counts.activeProductCount || 0),
-      draftCount: Number(draftMap.get(String(data._id)) || 0),
+      draftCount: counts.draftCount,
+      directProductCount: Number(productMap.get(String(data._id))?.productCount || 0),
       childCount: Number(childMap.get(String(data._id)) || 0),
     };
   });
@@ -158,6 +166,7 @@ async function resolveParent(parentId, category, req) {
   if (category && String(parentId) === String(category._id)) throw new ApiError('VALIDATION_ERROR', 'A category cannot be its own parent');
   const parent = await Category.findOne(scoped(req, { _id: parentId, isArchived: { $ne: true } }));
   if (!parent) throw new ApiError('VALIDATION_ERROR', 'Choose an available parent category from this store');
+  if (category && String(category.storeId || '') !== String(parent.storeId || '')) throw new ApiError('VALIDATION_ERROR', 'Parent and child must belong to the same store');
   if (Number(parent.level || 0) >= 5) throw new ApiError('VALIDATION_ERROR', 'Category hierarchy can contain at most 6 levels');
   if (category) {
     const descendants = await descendantsOf(category._id, req);
@@ -172,18 +181,26 @@ async function resolveParent(parentId, category, req) {
 
 async function assertVisibleParent(parentId, isActive, req) {
   if (!parentId || !isActive) return;
-  const parent = await Category.findOne(scoped(req, { _id: parentId })).select('isActive isArchived').lean();
-  if (!parent || parent.isArchived || !parent.isActive) throw new ApiError('VALIDATION_ERROR', 'Make the parent category visible first');
+  const visited = new Set();
+  let current = parentId;
+  while (current) {
+    if (visited.has(String(current))) throw new ApiError('VALIDATION_ERROR', 'Category hierarchy contains a cycle');
+    visited.add(String(current));
+    const parent = await Category.findOne(scoped(req, { _id: current })).select('parent isActive isArchived').lean();
+    if (!parent || parent.isArchived || !parent.isActive) throw new ApiError('VALIDATION_ERROR', 'Make the parent category visible first');
+    current = parent.parent;
+  }
 }
 
 async function updateDescendantLevels(category, req) {
   let frontier = [{ id: category._id, level: category.level }];
+  const visited = new Set([String(category._id)]);
   while (frontier.length) {
     const parentIds = frontier.map((item) => item.id);
     const levels = new Map(frontier.map((item) => [String(item.id), item.level]));
-    const children = await Category.find(scoped(req, { parent: { $in: parentIds } }));
+    const children = (await Category.find(scoped(req, { parent: { $in: parentIds } }))).filter((child) => !visited.has(String(child._id)));
     if (!children.length) break;
-    for (const child of children) child.level = Number(levels.get(String(child.parent)) || 0) + 1;
+    for (const child of children) { visited.add(String(child._id)); child.level = Number(levels.get(String(child.parent)) || 0) + 1; }
     await Promise.all(children.map((child) => child.save()));
     frontier = children.map((child) => ({ id: child._id, level: child.level }));
   }
@@ -199,9 +216,12 @@ exports.getCategories = asyncHandler(async (req, res) => {
   const archiveMode = String(req.query.archive || '').toLowerCase();
   const visibility = privateRequest
     ? archiveMode === 'only' ? { isArchived: true } : archiveMode === 'all' ? {} : { isArchived: { $ne: true } }
-    : { isActive: true, isArchived: { $ne: true } };
-  const categories = await Category.find(scoped(req, visibility)).populate('parent', 'name slug isActive isArchived').sort('level displayOrder name');
-  res.json(privateRequest ? await enrichCategories(categories, req) : categories);
+    : {};
+  const all = await Category.find(scoped(req, visibility)).sort('level displayOrder name').lean();
+  const categories = privateRequest ? all : visibleCategories(all);
+  const withPaths = categories.map((category) => ({ ...category, path: categoryPath(category, all).map((item) => ({ _id: item._id, name: item.name, slug: item.slug })) }));
+  await Category.populate(withPaths, { path: 'parent', select: 'name slug isActive isArchived' });
+  res.json(privateRequest ? await enrichCategories(withPaths, req) : withPaths);
 });
 
 exports.getCategoryById = asyncHandler(async (req, res) => {
@@ -219,9 +239,10 @@ exports.getCategoryImpact = asyncHandler(async (req, res) => {
 exports.createCategory = asyncHandler(async (req, res) => {
   const source = requestedPayload(req.body);
   const name = textValue(source.name, 80, 'Category name', { required: true });
-  const slug = slugify(source.slug || name);
-  if (!slug) throw new ApiError('VALIDATION_ERROR', 'Enter a category name that can create a valid URL');
   const hierarchy = await resolveParent(source.parent, null, req);
+  const parentSlug = hierarchy.parent ? (await Category.findById(hierarchy.parent).select('slug').lean())?.slug : '';
+  const slug = slugify(source.slug || [parentSlug, name].filter(Boolean).join('-'));
+  if (!slug) throw new ApiError('VALIDATION_ERROR', 'Enter a category name that can create a valid URL');
   await assertVisibleParent(hierarchy.parent, source.isActive !== false, req);
   await assertUniqueCategory({ name, slug, parent: hierarchy.parent }, req);
   const payload = withStoreId({
@@ -240,6 +261,10 @@ exports.createCategory = asyncHandler(async (req, res) => {
     isArchived: false,
     archivedAt: null,
   }, req);
+  if (hierarchy.parent && !req.store?._id) {
+    const parent = await Category.findById(hierarchy.parent).select('storeId').lean();
+    if (parent?.storeId) payload.storeId = parent.storeId;
+  }
   const category = await Category.create(payload);
   await logAudit({ req, action: 'CATEGORY_CREATE', entityType: 'Category', entityId: category._id, storeId: category.storeId, after: auditSnapshot(category, CATEGORY_AUDIT_FIELDS) });
   res.status(201).json(category);
@@ -284,6 +309,10 @@ exports.updateCategory = asyncHandler(async (req, res) => {
   if (category.isArchived) category.isActive = false;
   await category.save();
   if (source.parent !== undefined) await updateDescendantLevels(category, req);
+  if (source.isActive === false) {
+    const descendants = await descendantsOf(category._id, req);
+    if (descendants.length) await Category.updateMany(scoped(req, { _id: { $in: descendants.map((item) => item.id) } }), { $set: { isActive: false } });
+  }
   if (oldImage && oldImage !== category.image && oldImage !== category.socialImage) await safeDeleteCategoryImageIfUnused(oldImage);
   if (oldSocialImage && oldSocialImage !== category.socialImage && oldSocialImage !== category.image && oldSocialImage !== oldImage) await safeDeleteCategoryImageIfUnused(oldSocialImage);
   await logAudit({ req, action: 'CATEGORY_UPDATE', entityType: 'Category', entityId: category._id, storeId: category.storeId, before, after: auditSnapshot(category, CATEGORY_AUDIT_FIELDS) });
@@ -295,10 +324,7 @@ exports.updateCategoryStatus = asyncHandler(async (req, res) => {
   const category = await Category.findOne(scoped(req, { _id: req.params.id }));
   if (!category) return res.status(404).json({ message: 'Category not found' });
   if (req.body.isActive && category.isArchived) throw new ApiError('VALIDATION_ERROR', 'Restore this category before making it visible');
-  if (req.body.isActive && category.parent) {
-    const parent = await Category.findOne(scoped(req, { _id: category.parent }));
-    if (!parent || parent.isArchived || !parent.isActive) throw new ApiError('VALIDATION_ERROR', 'Make the parent category visible first');
-  }
+  await assertVisibleParent(category.parent, req.body.isActive, req);
   const before = { isActive: category.isActive };
   category.isActive = req.body.isActive;
   await category.save();
@@ -348,26 +374,26 @@ exports.reassignCategory = asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(targetId) || String(targetId) === String(source._id)) throw new ApiError('VALIDATION_ERROR', 'Choose a different destination category');
   const target = await Category.findOne(scoped(req, { _id: targetId, isArchived: { $ne: true } }));
   if (!target) throw new ApiError('VALIDATION_ERROR', 'Choose an available destination category from this store');
-  const couponIds = await Coupon.find(scoped(req, { applicableCategories: source._id })).distinct('_id');
-  const [products, drafts] = await Promise.all([
-    Product.updateMany(scoped(req, { category: source._id }), { $set: { category: target._id } }),
-    ProductDraft.updateMany(scoped(req, { category: source._id }), { $set: { category: target._id } }),
-  ]);
-  if (couponIds.length) {
-    await Coupon.updateMany(scoped(req, { _id: { $in: couponIds } }), { $pull: { applicableCategories: source._id } });
-    await Coupon.updateMany(scoped(req, { _id: { $in: couponIds } }), { $addToSet: { applicableCategories: target._id } });
-  }
-  source.isActive = false;
-  source.isArchived = true;
-  source.archivedAt = new Date();
-  await source.save();
+  if (String(source.storeId || '') !== String(target.storeId || '')) throw new ApiError('VALIDATION_ERROR', 'Source and destination must belong to the same store');
   const descendants = await descendantsOf(source._id, req);
-  if (descendants.length) {
-    await Category.updateMany(scoped(req, { _id: { $in: descendants.map((item) => item.id) } }), { $set: { isActive: false, isArchived: true, archivedAt: source.archivedAt } });
-  }
-  const moved = { products: Number(products.modifiedCount || 0), drafts: Number(drafts.modifiedCount || 0), coupons: couponIds.length };
+  if (descendants.some((item) => String(item.id) === String(target._id))) throw new ApiError('VALIDATION_ERROR', 'Choose a destination outside this category branch');
+  const branchIds = [source._id, ...descendants.map((item) => item.id)];
+  const moved = await runInTransaction(async (session) => {
+    const options = session ? { session } : {};
+    const couponIds = await Coupon.find(scoped(req, { applicableCategories: { $in: branchIds } })).session(session).distinct('_id');
+    const products = await Product.updateMany(scoped(req, { category: { $in: branchIds } }), { $set: { category: target._id } }, options);
+    const drafts = await ProductDraft.updateMany(scoped(req, { category: { $in: branchIds } }), { $set: { category: target._id } }, options);
+    if (couponIds.length) {
+      await Coupon.updateMany(scoped(req, { _id: { $in: couponIds } }), { $pull: { applicableCategories: { $in: branchIds } } }, options);
+      await Coupon.updateMany(scoped(req, { _id: { $in: couponIds } }), { $addToSet: { applicableCategories: target._id } }, options);
+    }
+    const archivedAt = new Date();
+    await Category.updateMany(scoped(req, { _id: { $in: branchIds } }), { $set: { isActive: false, isArchived: true, archivedAt } }, options);
+    return { products: Number(products.modifiedCount || 0), drafts: Number(drafts.modifiedCount || 0), coupons: couponIds.length };
+  });
+  const refreshedSource = await Category.findById(source._id);
   await logAudit({ req, action: 'CATEGORY_REASSIGN', entityType: 'Category', entityId: source._id, storeId: source.storeId, before: { destination: null, isArchived: false }, after: { destination: target._id, isArchived: true, moved } });
-  res.json({ message: `Items moved to ${target.name}; ${source.name} was archived`, moved, category: source });
+  res.json({ message: `Items moved to ${target.name}; ${source.name} was archived`, moved, category: refreshedSource });
 });
 
 exports.reorderCategories = asyncHandler(async (req, res) => {

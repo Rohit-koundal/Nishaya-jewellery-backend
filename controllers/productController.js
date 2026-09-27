@@ -3,6 +3,7 @@ const { applyProductStructure, readConfiguration } = require('../services/master
 const Product = require('../models/Product');
 const InventoryTransaction = require('../models/InventoryTransaction');
 const Category = require('../models/Category');
+const { categoryPath, descendantIds, resolveCategoryIds, readCategoryHierarchy } = require('../services/categoryHierarchy');
 const slugify = require('../utils/slugify');
 const mongoose = require('mongoose');
 const { normalizeProductImages, normalizeProductPayload, sanitizeProductImages } = require('../utils/imageUtils');
@@ -108,6 +109,8 @@ exports.getProducts = asyncHandler(async (req, res) => {
     ],
   };
   const query = catalogQuery(req, isAdminRequest ? archiveFilter : publicVisibility);
+  const hierarchy = req.query.category || req.query.search
+    ? await readCategoryHierarchy(req.tenantFilter, { publicOnly: !isAdminRequest }) : [];
   const dynamicFilterKeys = Object.keys(req.query || {}).filter((key) => key.startsWith('attr_'));
   const catalogConfiguration = req.query.search || dynamicFilterKeys.length || req.query.includeFacets === 'true'
     ? await readConfiguration(req.store?._id)
@@ -116,20 +119,18 @@ exports.getProducts = asyncHandler(async (req, res) => {
   const searchableAttributes = configuredAttributes.filter((attribute) => attribute.searchable).map((attribute) => attribute.key);
   if (req.query.search) {
     const terms = readQueryValues(String(req.query.search).split(/\s+/), 8);
-    const categoryMatches = await Promise.all(terms.map((term) => Category.find(andFilter({
-      isActive: { $ne: false },
-      $or: searchTermVariants(term).map((variant) => ({ name: { $regex: escapeRegex(variant), $options: 'i' } })),
-    }, req.tenantFilter)).select('_id').limit(50).lean()));
+    const categoryMatches = terms.map((term) => descendantIds(hierarchy, hierarchy.filter((category) => searchTermVariants(term).some((variant) => category.name.toLowerCase().includes(variant.toLowerCase()))).map((category) => category._id)));
     terms.forEach((term, index) => addQueryClause(query, { $or: searchTermVariants(term).flatMap((variant) => [
       { name: { $regex: escapeRegex(variant), $options: 'i' } },
       { sku: { $regex: escapeRegex(variant), $options: 'i' } },
       { brand: { $regex: escapeRegex(variant), $options: 'i' } },
+      { subCategory: { $regex: escapeRegex(variant), $options: 'i' } },
       { fabric: { $regex: escapeRegex(variant), $options: 'i' } },
       { occasion: { $regex: escapeRegex(variant), $options: 'i' } },
       { description: { $regex: escapeRegex(variant), $options: 'i' } },
       { shortDescription: { $regex: escapeRegex(variant), $options: 'i' } },
       { tags: { $regex: escapeRegex(variant), $options: 'i' } },
-      ...(categoryMatches[index].length ? [{ category: { $in: categoryMatches[index].map((item) => item._id) } }] : []),
+      ...(categoryMatches[index].length ? [{ category: { $in: categoryMatches[index] } }] : []),
       ...searchableAttributes.map((key) => ({ [`attributeValues.${key}`]: { $regex: escapeRegex(variant), $options: 'i' } })),
     ]) }));
   }
@@ -141,16 +142,7 @@ exports.getProducts = asyncHandler(async (req, res) => {
     if (values.length) query[`attributeValues.${attributeKey}`] = { $in: values.map(exactCaseInsensitive) };
   });
   if (req.query.category) {
-    const selectedCategories = readQueryValues(req.query.category);
-    const objectIds = selectedCategories.filter((value) => mongoose.Types.ObjectId.isValid(value));
-    const aliases = selectedCategories.filter((value) => !mongoose.Types.ObjectId.isValid(value));
-    const matchedCategories = aliases.length ? await Category.find(andFilter({ $or: [
-      { slug: { $in: aliases.map(exactCaseInsensitive) } },
-      { previousSlugs: { $in: aliases.map(exactCaseInsensitive) } },
-      { name: { $in: aliases.map(exactCaseInsensitive) } },
-    ] }, req.tenantFilter)).select('_id').lean() : [];
-    const categoryIds = [...new Set([...objectIds, ...matchedCategories.map((item) => String(item._id))])];
-    query.category = categoryIds.length ? { $in: categoryIds } : null;
+    query.category = { $in: resolveCategoryIds(hierarchy, readQueryValues(req.query.category)) };
   }
   if (req.query.size) {
     const values = readQueryValues(req.query.size).map(exactCaseInsensitive);
@@ -308,13 +300,18 @@ async function buildPublicCatalogFacets(req, catalogConfiguration, configuredAtt
   });
   const [rawProducts, categories] = await Promise.all([
     Product.find(visibility).select('name sku brand category subCategory price originalPrice salePrice saleStartAt saleEndAt discountPercentage rating stock sizes colors variants fabric occasion description shortDescription tags attributeValues isFeatured isNewArrival isBestSeller showInTrending').lean(),
-    Category.find(andFilter({ isActive: { $ne: false }, isArchived: { $ne: true } }, req.tenantFilter)).select('_id name slug previousSlugs').lean(),
+    readCategoryHierarchy(req.tenantFilter, { publicOnly: true }),
   ]);
   const products = rawProducts.map((product) => applyEffectivePricing(product));
   const categoryById = new Map(categories.map((category) => [String(category._id), category]));
   const filters = req.query || {};
   const matching = (...ignored) => products.filter((product) => productMatchesPublicFilters(product, filters, categoryById, new Set(ignored), configuredAttributes));
   const categoryProducts = matching('category');
+  const categoryCounts = new Map();
+  categoryProducts.forEach((product) => categoryPath(categoryById.get(String(product.category)), categoryById).forEach((category) => {
+    const id = String(category._id);
+    categoryCounts.set(id, (categoryCounts.get(id) || 0) + 1);
+  }));
   const sizeProducts = matching('size');
   const colorProducts = matching('color');
   const fabricProducts = matching('fabric');
@@ -346,7 +343,9 @@ async function buildPublicCatalogFacets(req, catalogConfiguration, configuredAtt
     categories: categories.map((category) => ({
       value: String(category._id),
       label: category.name,
-      count: categoryProducts.filter((product) => String(product.category || '') === String(category._id)).length,
+      parent: category.parent || null,
+      level: categoryPath(category, categoryById).length - 1,
+      count: categoryCounts.get(String(category._id)) || 0,
     })),
     sizes: buildFacetOptions(products.flatMap((product) => productOptionValues(product, 'size')), sizeProducts, (product, value) => productOptionValues(product, 'size').some((item) => sameText(item, value)), sortFacetSizes),
     colors: buildFacetOptions(products.flatMap((product) => productOptionValues(product, 'color')), colorProducts, (product, value) => productOptionValues(product, 'color').some((item) => sameText(item, value))),
@@ -365,15 +364,16 @@ async function buildPublicCatalogFacets(req, catalogConfiguration, configuredAtt
 
 function productMatchesPublicFilters(product, filters, categoryById, ignored, configuredAttributes) {
   if (!ignored.has('search') && filters.search) {
-    const category = categoryById.get(String(product.category || ''));
+    const path = categoryPath(categoryById.get(String(product.category || '')), categoryById);
+    const category = { name: path.map((item) => item.name).join(' '), slug: path.map((item) => item.slug).join(' ') };
     const searchableKeys = configuredAttributes.filter((attribute) => attribute.searchable).map((attribute) => attribute.key);
     const haystack = [product.name, product.sku, product.brand, category?.name, category?.slug, product.subCategory, product.fabric, product.occasion, product.description, product.shortDescription, ...(product.tags || []), ...searchableKeys.map((key) => readAttributeValue(product, key))].flatMap(splitStoredValues).join(' ').toLowerCase();
     const terms = String(filters.search).trim().toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8);
     if (!terms.every((term) => searchTermVariants(term).some((variant) => haystack.includes(variant.toLowerCase())))) return false;
   }
   if (!ignored.has('category') && filters.category) {
-    const category = categoryById.get(String(product.category || ''));
-    const aliases = [product.category, category?.name, category?.slug, ...(category?.previousSlugs || [])].map(normalizeFacetKey).filter(Boolean);
+    const path = categoryPath(categoryById.get(String(product.category || '')), categoryById);
+    const aliases = path.flatMap((category) => [category._id, category.name, category.slug, ...(category.previousSlugs || [])]).map(normalizeFacetKey).filter(Boolean);
     if (!readQueryValues(filters.category).some((value) => aliases.includes(normalizeFacetKey(value)))) return false;
   }
   if (!ignored.has('size') && filters.size && !matchesAnyFacet(productOptionValues(product, 'size'), filters.size)) return false;
@@ -478,7 +478,9 @@ exports.getProductBySlug = asyncHandler(async (req, res) => {
     }, scoped)).populate('category');
   }
   if (!product) return res.status(404).json({ message: 'Product not found' });
-  res.json(normalizeProductResponse(product, req));
+  const tree = await readCategoryHierarchy(req.tenantFilter, { publicOnly: true });
+  const selected = tree.find((category) => String(category._id) === String(product.category?._id || product.category));
+  res.json({ ...normalizeProductResponse(product, req), categoryPath: categoryPath(selected, tree).map((category) => ({ _id: category._id, name: category.name, slug: category.slug })) });
 });
 
 exports.getProductById = asyncHandler(async (req, res) => {
@@ -785,7 +787,7 @@ exports.exportProducts = asyncHandler(async (req, res) => {
     { sku: { $regex: escapeRegex(String(req.query.search)), $options: 'i' } },
     { barcode: { $regex: escapeRegex(String(req.query.search)), $options: 'i' } },
   ];
-  if (req.query.category && mongoose.Types.ObjectId.isValid(req.query.category)) filter.category = req.query.category;
+  if (req.query.category) filter.category = { $in: resolveCategoryIds(await readCategoryHierarchy(req.tenantFilter), readQueryValues(req.query.category)) };
   if (req.query.status === 'active') filter.isActive = true;
   if (req.query.status === 'inactive') filter.isActive = false;
   if (req.query.stock === 'out') filter.stock = { $lte: 0 };

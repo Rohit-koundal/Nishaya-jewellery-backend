@@ -4,6 +4,9 @@ const Order = require('../models/Order');
 const { ApiError } = require('../utils/apiError');
 const { requireCouponCode } = require('../utils/validators');
 const { andFilter, defaultStoreFilter } = require('./storeService');
+const { readCategoryHierarchy, descendantIds } = require('./categoryHierarchy');
+// Request-local scope expansion: never rewrite the stored coupon definition.
+const expandedCategoryScopes = new WeakMap();
 
 /**
  * Single source of truth for coupon rules.
@@ -42,7 +45,7 @@ function itemLineTotal(item) {
  */
 function couponScopedItems(coupon, items) {
   const productIds = idList(coupon?.applicableProducts);
-  const categoryIds = idList(coupon?.applicableCategories);
+  const categoryIds = expandedCategoryScopes.get(coupon) || idList(coupon?.applicableCategories);
   const matchMode = String(coupon?.scopeMatchMode || 'ALL').toUpperCase();
   return (Array.isArray(items) ? items : []).filter((item) => {
     const productSelected = productIds.includes(itemProductId(item));
@@ -220,6 +223,10 @@ async function assertCouponRules(coupon, { cartTotal, paymentMethod, items, user
   const amount = Number(cartTotal || 0);
   if (amount <= 0) {
     throw new ApiError('INVALID_COUPON', 'Add items to your bag before applying a coupon');
+  }
+  if (idList(coupon.applicableCategories).length) {
+    const scope = andFilter(tenantFilter, coupon.storeId ? { storeId: coupon.storeId } : defaultStoreFilter());
+    expandedCategoryScopes.set(coupon, descendantIds(await readCategoryHierarchy(scope), idList(coupon.applicableCategories)));
   }
   const requirementAmount = minimumBase(coupon, amount, items);
   if (coupon.minOrderAmount && requirementAmount < Number(coupon.minOrderAmount)) {

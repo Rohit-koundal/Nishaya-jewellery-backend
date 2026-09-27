@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const Banner = require('../models/Banner');
 const Category = require('../models/Category');
+const { visibleCategories } = require('../services/categoryHierarchy');
 const Product = require('../models/Product');
 const Settings = require('../models/Settings');
 const WebsiteTheme = require('../models/WebsiteTheme');
@@ -187,10 +188,10 @@ exports.getMobileHome = asyncHandler(async (req, res) => {
 
   const [categories, banners] = await Promise.all([
     settled('categories', async () => {
-      const base = await Category.find(andFilter({ isActive: true, isArchived: { $ne: true } }, req.tenantFilter))
-        .sort('level displayOrder name').limit(CATEGORY_LIMIT).lean();
-      if (!configured.categoryIds.length) return base.map(publicCategory);
-      const selected = await Category.find(andFilter({ _id: { $in: configured.categoryIds }, isActive: true, isArchived: { $ne: true } }, req.tenantFilter)).lean();
+      const base = visibleCategories(await Category.find(andFilter({}, req.tenantFilter))
+        .sort('level displayOrder name').lean());
+      if (!configured.categoryIds.length) return base.slice(0, CATEGORY_LIMIT).map(publicCategory);
+      const selected = base.filter((category) => configured.categoryIds.some((id) => String(id) === String(category._id)));
       return uniqueById([...selected, ...base]).slice(0, CATEGORY_LIMIT).map(publicCategory);
     }, [], warnings),
     settled('banners', async () => {

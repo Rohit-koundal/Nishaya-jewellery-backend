@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const Coupon = require('../models/Coupon');
 const Product = require('../models/Product');
 const Category = require('../models/Category');
+const { readCategoryHierarchy, categoryPath, descendantIds } = require('../services/categoryHierarchy');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const CustomerCrm = require('../models/CustomerCrm');
@@ -375,18 +376,24 @@ exports.searchCouponOptions = asyncHandler(async (req, res) => {
       Category.find(andFilter({ ...base, ...optionSearchFilter(search, ['name', 'slug']) }, req.tenantFilter)).select('name slug isActive').sort('level displayOrder name').limit(limit).lean(),
     ]);
     const items = mergeOptions(selectedItems, searchedItems);
+    const hierarchy = await readCategoryHierarchy(req.tenantFilter);
+    const branchIds = descendantIds(hierarchy, items.map((item) => item._id)).map((id) => new mongoose.Types.ObjectId(id));
     const productRows = items.length ? await Product.aggregate([
-      { $match: andFilter({ category: { $in: items.map((item) => item._id) }, isArchived: { $ne: true }, isActive: { $ne: false } }, req.tenantFilter) },
+      { $match: andFilter({ category: { $in: branchIds }, isArchived: { $ne: true }, isActive: { $ne: false } }, req.tenantFilter) },
       { $sort: { name: 1 } },
       { $group: { _id: '$category', count: { $sum: 1 }, names: { $push: '$name' } } },
       { $project: { count: 1, samples: { $slice: ['$names', 2] } } },
     ]) : [];
     const productSummary = new Map(productRows.map((row) => [String(row._id), row]));
     return res.json({ items: items.map((item) => {
-      const summary = productSummary.get(String(item._id)) || { count: 0, samples: [] };
+      const summary = descendantIds(hierarchy, [item._id]).reduce((result, id) => {
+        const row = productSummary.get(id);
+        return { count: result.count + Number(row?.count || 0), samples: [...result.samples, ...(row?.samples || [])].slice(0, 2) };
+      }, { count: 0, samples: [] });
+      const selectedCategory = hierarchy.find((category) => String(category._id) === String(item._id));
       const sampleText = summary.samples.length ? `: ${summary.samples.join(', ')}` : '';
       return {
-        id: String(item._id), label: item.name,
+        id: String(item._id), label: categoryPath(selectedCategory, hierarchy).map((category) => category.name).join(' / ') || item.name,
         subtitle: item.isActive === false ? 'Inactive category' : `${summary.count} eligible product${summary.count === 1 ? '' : 's'}${sampleText}`,
       };
     }) });

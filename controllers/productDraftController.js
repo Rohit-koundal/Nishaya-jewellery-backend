@@ -116,7 +116,10 @@ exports.listDrafts = asyncHandler(async (req, res) => {
   if (status === 'active') filter.status = { $ne: 'archived' };
   else if (status !== 'all') filter.status = status;
   if (sourceType) filter.sourceType = sourceType;
-  if (category) filter.category = category;
+  if (category) {
+    const { readCategoryHierarchy, resolveCategoryIds } = require('../services/categoryHierarchy');
+    filter.category = { $in: resolveCategoryIds(await readCategoryHierarchy(req.tenantFilter), [category]) };
+  }
   if (escapedSearch) filter.$or = [
     { name: { $regex: escapedSearch, $options: 'i' } },
     { sku: { $regex: escapedSearch, $options: 'i' } },
