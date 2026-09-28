@@ -6,6 +6,7 @@ const { licenseStatus } = require('../services/controlPlaneClient');
 const FEATURE_ROUTES = [
   [/^\/(?:admin\/reports|seller\/(?:reports|analytics))/, 'analytics'],
   [/^\/admin\/products\/(?:smart-fill|quick-analyze)/, 'aiProduct'],
+  [/^\/admin\/product-drafts\/[^/]+\/smart-fill$/, 'aiProduct'],
   [/^\/admin\/(?:social-imports|reel-imports)/, 'socialImport'],
   [/^\/(?:social|admin\/social|seller\/(?:social|instagram|inbox))/, 'socialStudio'],
   [/^\/(?:admin|seller)\/business\/assistant/, 'businessAssistant'],

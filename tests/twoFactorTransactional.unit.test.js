@@ -196,6 +196,39 @@ test('approved Nishaya content matches byte-for-byte after replacing only the OT
   assert.ok(!String(body).includes('NISHAYA_VERIFY'));
 });
 
+test('support-supplied message preserves brackets, capitalization, line breaks and branding; only XXXX becomes the OTP', async t => {
+  const supportFormat = '[HELLO] Your OTP for Phone\nVerification is XXXX. Valid for 5 mins\n-[Southern Express]';
+  const template = supportFormat.replace('XXXX', '{otp}');
+  // Use the same quoted multiline dotenv representation as the local config.
+  Object.assign(process.env, require('dotenv').parse(`TWOFACTOR_DELIVERY_MODE=transactional_sms\nTWOFACTOR_SMS_TEMPLATE="${template}"\n`));
+  delete process.env.TWOFACTOR_DLT_ENTITY_ID;
+  delete process.env.TWOFACTOR_DLT_TEMPLATE_ID;
+  process.env.TWOFACTOR_TEMPLATE_NAME = 'NISHAYA_VERIFY';
+  const fetch = mockReply(t);
+  assert.equal(sms.getSmsConfiguration().configured, true);
+  const result = await adapter.sendOtp('9876543210', '654321');
+  const [url, options] = fetch.mock.calls[0].arguments;
+  const body = new URLSearchParams(String(options.body));
+  assert.equal(url, 'https://2factor.in/API/R1/');
+  assert.equal(options.method, 'POST');
+  assert.equal(body.get('module'), 'TRANS_SMS');
+  assert.equal(body.get('from'), 'NISHAY', 'Message branding must not silently replace the configured sender');
+  assert.deepEqual(Buffer.from(body.get('msg')), Buffer.from(supportFormat.replace('XXXX', '654321')));
+  assert.equal(body.has('peid'), false);
+  assert.equal(body.has('ctid'), false);
+  assert.equal(result.delivery.deliveryMode, 'transactional_sms');
+  assert.equal(fetch.mock.callCount(), 1);
+  assert.doesNotMatch(JSON.stringify([console.info.mock.calls, console.warn.mock.calls]), /654321|9876543210|private-unit-key|Southern Express/);
+});
+
+test('a pasted support message with literal XXXX cannot be sent without a configured OTP placeholder', async t => {
+  process.env.TWOFACTOR_SMS_TEMPLATE = '[HELLO] Your OTP for Phone\nVerification is XXXX. Valid for 5 mins\n-[Southern Express]';
+  const fetch = mockReply(t);
+  assert.deepEqual(sms.getSmsConfiguration().invalid, ['TWOFACTOR_SMS_TEMPLATE']);
+  assert.equal((await sms.sendOtp('9876543210', '654321')).code, 'OTP_PROVIDER_NOT_CONFIGURED');
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
 test('safe readiness reports the selected route and field names without exposing any configured values', () => {
   const configuration = sms.getSmsConfiguration();
   assert.equal(configuration.configured, true);

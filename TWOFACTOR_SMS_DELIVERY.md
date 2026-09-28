@@ -1,5 +1,40 @@
 # 2Factor: configurable SMS delivery modes
 
+## Current support-directed message configuration (2026-09-28)
+
+The owner reports that 2Factor support instructed them to use the following exact message for SMS delivery, and explicitly requested that it be applied unchanged. This supersedes the earlier Nishaya-worded message for this installation:
+
+```text
+[HELLO] Your OTP for Phone
+Verification is XXXX. Valid for 5 mins
+-[Southern Express]
+```
+
+The local `.env` had this text in `TWOFACTOR_SMS_TEMPLATE`, but selected `sms_otp` (the `otp_sms` alias). That mode sends only the OTP/template name, not the configured full message. In addition, the pasted text still used literal `XXXX`, whereas the transactional adapter requires `{otp}`. The local configuration now selects the existing full-message transactional route and substitutes only that placeholder; brackets, casing, words, line breaks and `Southern Express` are retained as instructed. The existing `NISHAY` sender and API key are unchanged. No DLT IDs are invented. Existing `OTP_EXPIRY_MINUTES=5` matches the stated validity.
+
+Local `.env` (quoted multiline value is supported by the existing dotenv loader):
+
+```dotenv
+TWOFACTOR_DELIVERY_MODE=transactional_sms
+TWOFACTOR_SMS_SENDER_ID=NISHAY
+TWOFACTOR_SMS_TEMPLATE="[HELLO] Your OTP for Phone
+Verification is {otp}. Valid for 5 mins
+-[Southern Express]"
+OTP_EXPIRY_MINUTES=5
+```
+
+For Render, set `TWOFACTOR_DELIVERY_MODE` to `transactional_sms` and paste the following **three-line value without surrounding quotes** into `TWOFACTOR_SMS_TEMPLATE`. Keep the API key and sender unchanged, and ensure `OTP_EXPIRY_MINUTES=5`:
+
+```text
+[HELLO] Your OTP for Phone
+Verification is {otp}. Valid for 5 mins
+-[Southern Express]
+```
+
+Restart locally or save/redeploy the Render backend after updating its environment. `.env` is git-ignored: committing tests/docs does not apply local configuration to Render. Inactive OTP-mode template-name/confirmation fields can remain; they are ignored by transactional mode. The dynamic provider code, authentication, resend and verification logic are unchanged. A mocked regression test checks the exact outgoing R1 `TRANS_SMS` form, decoded message bytes, unchanged sender, and no retries or secrets in logs. No real SMS/call or production change was performed. Provider delivery must still be checked with one authorized handset test and the corresponding **Transactional SMS** delivery log; no outcome is claimed from the support message or local readiness alone.
+
+Validation for this configuration update: **111 targeted backend tests passed, 0 failed**; syntax and whitespace checks passed. The read-only local readiness check reports `transactional_sms`, `ready: true`, and empty `missing`/`invalid` lists. A separate local assertion confirms the exact three-line template and five-minute expiry without making network requests.
+
 ## What is fixed, and what is not
 
 The adapter supports two explicitly selected SMS products. It resolves the mode and its configuration from the backend environment on every send/resend; it never caches another mode's settings or automatically switches transports after a failure.

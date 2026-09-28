@@ -8,10 +8,18 @@ const Product = require('../models/Product');
 const ProductDraft = require('../models/ProductDraft');
 const InventoryTransaction = require('../models/InventoryTransaction');
 const { publishPreparedDraft } = require('../controllers/productDraftController');
+require('./catalogTestSetup');
+const Configuration = require('../models/MasterConfiguration');
+const { getIndustryPreset } = require('../config/industryPresets');
 
 test.before(startTestEnvironment);
 test.after(stopTestEnvironment);
-test.beforeEach(resetDatabase);
+test.beforeEach(async () => {
+  await resetDatabase();
+  // These pre-existing fixtures are apparel drafts, not the deployment's
+  // default jewellery industry (which has different required specifications).
+  await Configuration.create({ _id: 'store', structure: getIndustryPreset('fashion') });
+});
 async function draftFixture(overrides = {}) {
   const hasCategoryOverride = Object.prototype.hasOwnProperty.call(overrides, 'category');
   const category = hasCategoryOverride ? null : await Category.findOne({ slug: 'draft-sarees' }) || await Category.create({ name: 'Sarees', slug: 'draft-sarees' });

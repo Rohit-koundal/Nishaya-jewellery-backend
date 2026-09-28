@@ -336,13 +336,8 @@ function publicStructure(config) {
   const { clientPermissions: _private, ...structure } = config.structure;
   return { ...structure, revision: config.revision };
 }
-async function applyProductStructure(payload, existing = {}) {
-  const configuration = await readConfiguration(payload?.storeId || existing?.storeId);
-  const { structure } = configuration;
-  const values = payload.attributeValues ?? existing.attributeValues ?? {};
-  const source = values instanceof Map ? Object.fromEntries(values) : values;
-  const oldValues = existing.attributeValues instanceof Map ? Object.fromEntries(existing.attributeValues) : (existing.attributeValues || {});
-  if (!source || typeof source !== 'object' || Array.isArray(source)) bad('Attribute values must be an object');
+async function productAttributeContext(payload, existing = {}, configuration) {
+  const { structure } = configuration || await readConfiguration(payload?.storeId || existing?.storeId);
   const selectedCategoryId = payload.category || existing.category;
   const activeStoreId = payload?.storeId || existing?.storeId;
   const selectedCategory = selectedCategoryId && mongoose.isValidObjectId(selectedCategoryId)
@@ -378,6 +373,17 @@ async function applyProductStructure(payload, existing = {}) {
       else definitions.push(item);
     }
   }
+  return { definitions, categoryChain, categoryDefinition, definitionKey };
+}
+
+async function applyProductStructure(payload, existing = {}) {
+  const configuration = await readConfiguration(payload?.storeId || existing?.storeId);
+  const { structure } = configuration;
+  const values = payload.attributeValues ?? existing.attributeValues ?? {};
+  const source = values instanceof Map ? Object.fromEntries(values) : values;
+  const oldValues = existing.attributeValues instanceof Map ? Object.fromEntries(existing.attributeValues) : (existing.attributeValues || {});
+  if (!source || typeof source !== 'object' || Array.isArray(source)) bad('Attribute values must be an object');
+  const { definitions, categoryChain, categoryDefinition, definitionKey } = await productAttributeContext(payload, existing, configuration);
   const keys = new Set(definitions.map((item) => item.key));
   const protectedLegacyKeys = new Set(Object.keys(oldValues).filter((key) => !keys.has(key)));
   if (Object.keys(source).some((key) => !keys.has(key) && !protectedLegacyKeys.has(key))) bad('Only configured product attributes can be edited');
@@ -461,4 +467,4 @@ function validateAttributeValue(definition, raw) {
   if (definition.validation?.maxLength && cleaned.length > definition.validation.maxLength) bad(`${definition.label} is too long`);
   return cleaned;
 }
-module.exports = { validateStructure, readConfiguration, updateConfiguration, publicStructure, applyProductStructure };
+module.exports = { validateStructure, readConfiguration, updateConfiguration, publicStructure, applyProductStructure, productAttributeContext, validateAttributeValue };

@@ -143,3 +143,27 @@ test('caption autofill remains available without an AI key', async (t) => {
   assert.equal(value.price, 899); assert.equal(value.category, 'kurtis'); assert.equal(value.contextStatus, 'caption'); assert.equal(request.mock.callCount(), 0);
   assert.equal(captionSuggestion('Selling price: 899\nFabric: Cotton', '', categories).name, '');
 });
+
+test('catalog copy keeps paragraphs and permits visible design attributes but not material/purity guesses', () => {
+  const description = 'A clover-shaped silhouette with a gold-tone finish.\n\nStyle the motif with a simple neckline.';
+  const value = normalizeContext({ ...raw, name: 'Clover earrings', description, attributeValues: { jewellery_type: 'earrings', metal_type: 'Gold', purity: '18K' }, fieldSources: {
+    'attribute.jewellery_type': { source: 'visual', quote: 'Earring outlines' },
+    'attribute.metal_type': { source: 'visual', quote: 'Yellow metal' },
+    'attribute.purity': { source: 'visual', quote: 'Looks gold' },
+  } }, { catalogCopy: true, attributes: [{ key: 'jewellery_type', options: ['Earrings', 'Ring'] }, { key: 'metal_type', options: ['Gold', 'Brass'] }, { key: 'purity', options: ['18K'] }] });
+  assert.equal(value.description, description);
+  assert.deepEqual(value.attributeValues, { jewellery_type: 'Earrings' });
+});
+
+test('single and batch catalog prompt requests grounded, varied professional copy with language preferences', async (t) => {
+  const previous = process.env.GEMINI_API_KEY; process.env.GEMINI_API_KEY = 'test-not-live';
+  t.after(() => { if (previous === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = previous; });
+  t.mock.method(global, 'fetch', async (_url, options) => {
+    const prompt = JSON.parse(options.body).contents[0].parts[0].text;
+    assert.match(prompt, /Adapt length and structure to the product/); assert.match(prompt, /gold-tone\/silver-tone/);
+    assert.match(prompt, /Hindi/); assert.match(prompt, /Warm and informative/);
+    return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: JSON.stringify(raw) }] } }] }) };
+  });
+  const result = await analyzeProductContext({ caption: 'Name: Earrings', catalogCopy: true, copyPreferences: { language: 'Hindi', tone: 'Warm and informative' } });
+  assert.equal(result.contextStatus, 'completed');
+});

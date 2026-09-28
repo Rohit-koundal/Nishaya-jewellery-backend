@@ -55,6 +55,7 @@ router.get('/product-drafts/autosave', requireStorePermission('catalog.read'), p
 router.put('/product-drafts/autosave', requireStorePermission('catalog.write'), productDraft.saveAutosave);
 router.get('/product-drafts/:id', requireStorePermission('catalog.read'), productDraft.getDraft);
 router.put('/product-drafts/:id', requireStorePermission('catalog.write'), productDraft.updateDraft);
+router.post('/product-drafts/:id/smart-fill', requireStorePermission('catalog.write'), requireStoreFeature('aiProduct'), smartFill.limiter, require('../controllers/draftSmartFillController').fill);
 router.patch('/product-drafts/:id/archive', requireStorePermission('catalog.write'), productDraft.archiveDraft);
 router.patch('/product-drafts/:id/restore', requireStorePermission('catalog.write'), productDraft.restoreDraft);
 router.delete('/product-drafts/:id', requireStorePermission('catalog.write'), productDraft.deleteDraft);

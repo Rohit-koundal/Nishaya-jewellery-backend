@@ -1,7 +1,8 @@
 const { asyncHandler } = require('../middleware/validate');
 const { requireObjectId } = require('../utils/validators');
+const { ApiError } = require('../utils/apiError');
 const mongoose = require('mongoose');
-const { applyProductStructure } = require('../services/masterConfigurationService');
+const { applyProductStructure, readConfiguration, productAttributeContext, validateAttributeValue } = require('../services/masterConfigurationService');
 const multer = require('multer');
 const fs = require('fs/promises');
 const path = require('path');
@@ -43,7 +44,7 @@ exports.bulkUploadMiddleware = multer({
     },
     filename(req, file, cb) {
       const safeName = file.originalname.replace(/[^a-z0-9.]+/gi, '-').toLowerCase();
-      cb(null, `${Date.now()}-${safeName}`);
+      cb(null, `${require('crypto').randomUUID()}-${safeName}`);
     },
   }),
   fileFilter(req, file, cb) {
@@ -56,14 +57,16 @@ exports.bulkUploadMiddleware = multer({
 
 exports.bulkUpload = async (req, res, next) => {
   try {
+    const manifest = require('../services/draftPhotoGroups').readPhotoGroups(req.body?.groups, (req.files || []).length, req.body?.groupMode);
     const uploaded = await uploadDraftImages(req, req.files || []);
     if (!uploaded.length) return res.status(400).json({ success: false, message: 'Please upload at least one image' });
     const groupMode = req.body?.groupMode === 'single' ? 'single' : 'separate';
-    const groups = groupMode === 'single' ? [uploaded] : uploaded.map((file) => [file]);
+    const groups = manifest.map(group => group.fileIndexes.map(index => uploaded[index]));
     const drafts = await ProductDraft.insertMany(groups.map((files, index) => withDraftStore(req, {
       name: '',
       slug: uniqueDraftSlug(files[0]?.originalName || `draft-${index + 1}`),
-      sku: `DRAFT-${Date.now()}-${String(index + 1).padStart(2, '0')}`,
+      sku: `NJ-${require('crypto').randomBytes(6).toString('hex').toUpperCase()}`,
+      supplierSku: manifest[index].reference || '',
       image: files[0]?.url,
       images: files.map((file, fileIndex) => ({ url: file.url, publicId: file.publicId, primary: fileIndex === 0 })),
       videos: [],
@@ -72,7 +75,7 @@ exports.bulkUpload = async (req, res, next) => {
       price: 0,
       originalPrice: 0,
       sellingPrice: 0,
-      stock: 0,
+      stock: undefined,
       sizes: [],
       sizingMode: 'auto',
       sizeChartProfile: 'auto',
@@ -105,6 +108,7 @@ exports.bulkUpload = async (req, res, next) => {
 };
 
 exports.listDrafts = asyncHandler(async (req, res) => {
+  const checked = await draftFormatter(req);
   const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
   const limit = Math.min(MAX_DRAFT_PAGE_SIZE, Math.max(1, Number.parseInt(req.query.limit, 10) || 24));
   const status = ['draft', 'published', 'archived', 'all'].includes(req.query.status) ? req.query.status : 'active';
@@ -134,7 +138,7 @@ exports.listDrafts = asyncHandler(async (req, res) => {
   let total;
   if (readiness) {
     const all = await ProductDraft.find(scoped).populate('category', 'name slug isActive isArchived definitionKey').sort(sort).lean();
-    formatted = all.map(formatDraft).filter((draft) => draft.readiness?.state === readiness);
+    formatted = (await Promise.all(all.map(checked))).filter((draft) => draft.readiness?.state === readiness);
     total = formatted.length;
     formatted = formatted.slice((page - 1) * limit, page * limit);
   } else {
@@ -142,7 +146,7 @@ exports.listDrafts = asyncHandler(async (req, res) => {
       ProductDraft.find(scoped).populate('category', 'name slug isActive isArchived definitionKey').sort(sort).skip((page - 1) * limit).limit(limit).lean(),
       ProductDraft.countDocuments(scoped),
     ]);
-    formatted = drafts.map(formatDraft);
+    formatted = await Promise.all(drafts.map(checked));
     total = count;
   }
   const summaryBase = draftQuery(req, { autosaveKey: { $exists: false } });
@@ -150,9 +154,9 @@ exports.listDrafts = asyncHandler(async (req, res) => {
     ProductDraft.countDocuments(andFilter({ status: 'draft' }, summaryBase)),
     ProductDraft.countDocuments(andFilter({ status: 'published' }, summaryBase)),
     ProductDraft.countDocuments(andFilter({ status: 'archived' }, summaryBase)),
-    ProductDraft.find(andFilter({ status: 'draft' }, summaryBase)).select('name sku category images image price sellingPrice originalPrice stock sizes sizingMode sizeChart variants description shippingWeightKg metaTitle metaDescription').populate('category', 'name isActive isArchived').lean(),
+    ProductDraft.find(andFilter({ status: 'draft' }, summaryBase)).select('name sku category subCategory attributeValues images image price sellingPrice originalPrice stock sizes sizingMode sizeChart variants description shippingWeightKg metaTitle metaDescription').populate('category', 'name isActive isArchived definitionKey parent').lean(),
   ]);
-  const readinessCounts = attentionDocuments.map(formatDraft).reduce((counts, draft) => {
+  const readinessCounts = (await Promise.all(attentionDocuments.map(checked))).reduce((counts, draft) => {
     counts[draft.readiness.state] = (counts[draft.readiness.state] || 0) + 1;
     return counts;
   }, { ready: 0, review: 0, incomplete: 0 });
@@ -222,7 +226,7 @@ exports.getDraft = asyncHandler(async (req, res) => {
   requireObjectId(req.params.id, 'draft id');
   const draft = await ProductDraft.findOne(draftQuery(req, { _id: req.params.id })).populate('category');
   if (!draft) return res.status(404).json({ success: false, message: 'Draft not found' });
-  res.json({ success: true, data: formatDraft(draft) });
+  res.json({ success: true, data: await (await draftFormatter(req))(draft) });
 });
 
 exports.updateDraft = asyncHandler(async (req, res) => {
@@ -243,6 +247,32 @@ exports.updateDraft = asyncHandler(async (req, res) => {
   if (payloadError) return res.status(400).json({ success: false, message: payloadError });
   const categoryError = await validateDraftCategory(req, payload.category);
   if (categoryError) return res.status(400).json({ success: false, message: categoryError });
+  if (payload.attributeValues !== undefined) {
+    if (!payload.attributeValues || typeof payload.attributeValues !== 'object' || Array.isArray(payload.attributeValues)) throw new ApiError('VALIDATION_ERROR', 'Product specifications must be an object');
+    const { definitions } = await productAttributeContext({ category: payload.category || draft.category, subCategory: payload.subCategory ?? draft.subCategory, storeId: draft.storeId });
+    const byKey = new Map(definitions.map(definition => [definition.key, definition]));
+    const previousValues = draft.attributeValues instanceof Map ? Object.fromEntries(draft.attributeValues) : draft.attributeValues || {};
+    for (const [key, value] of Object.entries(payload.attributeValues)) {
+      if (!byKey.has(key)) { if (String(previousValues[key] ?? '') !== String(value)) throw new ApiError('VALIDATION_ERROR', 'Only configured specifications can be changed'); }
+      else validateAttributeValue(byKey.get(key), value);
+    }
+  }
+  if (draft.smartFill && req.body.confirmSmartFillReview !== true) {
+    const photos = images => (images || []).map(image => [image.url, Boolean(image.primary)]);
+    const changedPhotos = payload.images !== undefined && JSON.stringify(photos(payload.images)) !== JSON.stringify(photos(draft.images));
+    const changedNotes = payload.supplierNotes !== undefined && payload.supplierNotes !== draft.supplierNotes;
+    if (changedPhotos || changedNotes) {
+      payload['smartFill.state'] = 'review'; payload['smartFill.message'] = 'Source photos or supplier notes changed. Review or run Smart Fill again.';
+    }
+  }
+  if (req.body.confirmSmartFillReview === true) {
+    const candidate = { ...draft.toObject({ flattenMaps: true }), ...payload };
+    const prepared = await applyProductStructure(buildProductPayloadFromDraft(candidate));
+    const issue = validatePublishDraft(candidate, prepared);
+    if (issue) throw new ApiError('VALIDATION_ERROR', issue);
+    payload['smartFill.state'] = 'reviewed'; payload['smartFill.reviewedAt'] = new Date();
+    payload['smartFill.message'] = 'Details reviewed and confirmed by the owner.';
+  }
   if (payload.name && !payload.slug) payload.slug = uniqueDraftSlug(payload.name, draft._id);
   const currentRevision = Number(draft.revision || 0);
   const revisionFilter = baseRevision === undefined ? {} : Number(baseRevision) === 0
@@ -264,7 +294,7 @@ exports.updateDraft = asyncHandler(async (req, res) => {
     });
   }
   if (saveMode !== 'auto') await logAudit({ req, action: 'PRODUCT_DRAFT_UPDATED', entityType: 'ProductDraft', entityId: updated._id, before, after: auditSnapshot(updated, DRAFT_AUDIT_FIELDS), summary: 'Updated product draft' });
-  res.json({ success: true, message: 'Draft updated successfully', data: formatDraft(updated) });
+  res.json({ success: true, message: 'Draft updated successfully', data: await (await draftFormatter(req))(updated) });
 });
 
 exports.deleteDraft = asyncHandler(async (req, res) => {
@@ -339,7 +369,14 @@ exports.publishSelected = asyncHandler(async (req, res) => {
       results.push({ id, name: draft.name || '', status: 'already-published', productId: draft.publishedProductId });
       continue;
     }
-    const prepared = await applyProductStructure(buildProductPayloadFromDraft(draft));
+    let prepared;
+    try { prepared = await applyProductStructure(buildProductPayloadFromDraft(draft)); }
+    catch (error) {
+      const message = error.message || 'Review required product specifications';
+      await ProductDraft.updateOne(draftQuery(req, { _id: draft._id }), { $set: { lastPublishAttemptAt: new Date(), lastPublishError: message } });
+      results.push({ id, name: draft.name || '', status: 'failed', message });
+      continue;
+    }
     payloads.set(id, prepared);
     const validationMessage = validatePublishDraft(draft, prepared) || await validateCommercialDuplicates(draft, prepared);
     if (validationMessage) {
@@ -419,6 +456,28 @@ function formatDraft(draft) {
   return data;
 }
 
+async function draftFormatter(req) {
+  const configuration = await readConfiguration(req.store?._id);
+  const contexts = new Map();
+  return async draft => {
+    const data = formatDraft(draft);
+    if (['published', 'archived'].includes(data.status)) return data;
+    const category = data.category?._id || data.category;
+    const key = String(category || '') + ':' + String(data.subCategory || '');
+    if (!contexts.has(key)) contexts.set(key, productAttributeContext({ category, subCategory: data.subCategory, storeId: req.store?._id }, {}, configuration));
+    const { definitions } = await contexts.get(key);
+    const issues = [...data.readiness.issues];
+    for (const definition of definitions) {
+      try {
+        const value = validateAttributeValue(definition, data.attributeValues?.[definition.key]);
+        if (definition.required && !value) issues.push(`Enter ${definition.label}`);
+      } catch (error) { issues.push(error.message); }
+    }
+    if (issues.length) data.readiness = { ...data.readiness, state: 'incomplete', score: Math.min(data.readiness.score, 79), issues: [...new Set(issues)] };
+    return data;
+  };
+}
+
 function draftReadiness(data = {}) {
   if (data.status === 'published') return { state: 'published', score: 100, issues: [], warnings: [] };
   if (data.status === 'archived') return { state: 'archived', score: 0, issues: [], warnings: [] };
@@ -433,7 +492,7 @@ function draftReadiness(data = {}) {
   if (!images.length && !data.image) issues.push('Add at least one product photo');
   if (!Number.isFinite(price) || price <= 0) issues.push('Add a valid selling price');
   if (!Number.isFinite(originalPrice) || originalPrice < price) issues.push('MRP must be equal to or above the selling price');
-  if (!Number.isSafeInteger(Number(data.stock)) || Number(data.stock) < 0) issues.push('Add a whole-number stock quantity');
+  if (data.stock == null || String(data.stock).trim() === '' || !Number.isSafeInteger(Number(data.stock)) || Number(data.stock) < 0) issues.push('Add a whole-number stock quantity');
   if (!issues.length) {
     try {
       const sizingError = validateProductSizing(buildProductPayloadFromDraft(data), data.category?.name || '');
@@ -482,6 +541,10 @@ function escapeRegex(value) {
 
 function normalizeDraftPayload(body = {}) {
   const payload = { ...body };
+  // Processing provenance is server-owned, not an editable product field.
+  for (const key of Object.keys(payload)) if (key === 'smartFill' || key.startsWith('smartFill.')) delete payload[key];
+  delete payload.confirmSmartFillReview;
+  if (payload.supplierNotes !== undefined && (typeof payload.supplierNotes !== 'string' || payload.supplierNotes.length > 7000)) throw new ApiError('VALIDATION_ERROR', 'Keep supplier notes under 7,000 characters');
   if (typeof payload.images === 'string') {
     try {
       payload.images = JSON.parse(payload.images);
@@ -505,7 +568,7 @@ function normalizeDraftPayload(body = {}) {
   if (payload.originalPrice !== undefined) payload.originalPrice = Number(payload.originalPrice);
   if (payload.salePrice !== undefined) payload.salePrice = Number(payload.salePrice);
   if (payload.sellingPrice !== undefined) payload.sellingPrice = Number(payload.sellingPrice);
-  if (payload.stock !== undefined) payload.stock = Number(payload.stock);
+  if (payload.stock !== undefined) payload.stock = payload.stock === null || String(payload.stock).trim() === '' ? null : Number(payload.stock);
   for (const key of ['costPrice', 'gstRate', 'lowStockAlert', 'reorderQuantity', 'shippingWeightKg']) if (payload[key] !== undefined) payload[key] = Number(payload[key]);
   if (payload.returnWindowDays === '' || payload.returnWindowDays === null) delete payload.returnWindowDays;
   else if (payload.returnWindowDays !== undefined) payload.returnWindowDays = Number(payload.returnWindowDays);
@@ -530,6 +593,9 @@ async function validateDraftCategory(req, categoryId) {
 
 function validateDraftPayload(payload) {
   for (const key of ['stock', 'lowStockAlert', 'reorderQuantity']) {
+    // Null means unknown in a draft, not a verified zero. Publication still
+    // requires an explicit integer stock quantity.
+    if (key === 'stock' && payload[key] === null) continue;
     if (payload[key] !== undefined && (!Number.isSafeInteger(payload[key]) || payload[key] < 0)) return `${draftFieldLabel(key)} must be a whole number of zero or more`;
   }
   for (const key of ['price', 'sellingPrice', 'originalPrice', 'salePrice', 'costPrice']) {
