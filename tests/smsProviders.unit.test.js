@@ -6,7 +6,7 @@ const { getAdapter } = require('../services/providers/smsProviderRegistry');
 const configurations = {
   twilio: { SMS_ACCOUNT_SID: 'AC-test-account', SMS_AUTH_TOKEN: 'private-test-token', SMS_SENDER_ID: '+15005550006' },
   msg91: { MSG91_AUTH_KEY: 'private-test-key', MSG91_TEMPLATE_ID: 'test-template' },
-  '2factor': { TWOFACTOR_API_KEY: 'private-test-key', TWOFACTOR_TEMPLATE_NAME: 'Nishaya OTP' },
+  '2factor': { TWOFACTOR_API_KEY: 'private-test-key', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Nishaya verification code: {otp}.' },
   fast2sms: { FAST2SMS_API_KEY: 'private-test-key' },
 };
 const accepted = {
@@ -26,6 +26,7 @@ test.beforeEach(t => {
     Object.assign(process.env, previous);
   });
   t.mock.method(console, 'warn', () => {});
+  t.mock.method(console, 'info', () => {});
   // Every test must explicitly mock a provider response; never send paid SMS.
   t.mock.method(global, 'fetch', async () => { throw new Error('Unexpected network request'); });
 });
@@ -60,8 +61,11 @@ test('every registered provider sends the backend OTP with a timeout and no redi
       assert.equal(options.headers.authkey, 'private-test-key');
     } else if (name === '2factor') {
       assert.equal(url.hostname, '2factor.in');
-      assert.equal(decodeURIComponent(url.pathname), '/API/V1/private-test-key/SMS/+919876543210/654321/Nishaya OTP');
-      assert.ok(!url.pathname.includes('AUTOGEN'));
+      assert.equal(url.pathname, '/API/R1/');
+      assert.equal(options.body.get('module'), 'TRANS_SMS');
+      assert.equal(options.body.get('to'), '919876543210');
+      assert.equal(options.body.get('msg'), 'Nishaya verification code: 654321.');
+      assert.equal(result.channel, 'sms');
     } else {
       assert.equal(JSON.parse(options.body).numbers, '9876543210');
       assert.equal(JSON.parse(options.body).variables_values, '654321');
@@ -92,14 +96,15 @@ test('provider-specific variables override legacy settings; legacy MSG91 and Fas
   assert.equal(msg91Fetch.mock.calls[0].arguments[1].headers.authkey, 'private-test-key');
 });
 
-test('case and 2Factor aliases select the same adapter; optional template can be omitted', async t => {
+test('case and 2Factor aliases select the same SMS-only adapter without a legacy template name', async t => {
   configure('2factor');
   delete process.env.TWOFACTOR_TEMPLATE_NAME;
   for (const name of [' 2FACTOR ', 'twofactor', 'two-factor']) {
     process.env.SMS_PROVIDER = name;
     const fetch = reply(t, accepted['2factor']);
     assert.equal((await sms.sendOtp('9876543210', '654321')).provider, '2factor');
-    assert.match(fetch.mock.calls[0].arguments[0], /\/654321$/);
+    assert.equal(fetch.mock.calls[0].arguments[0], 'https://2factor.in/API/R1/');
+    assert.equal(fetch.mock.calls[0].arguments[1].body.get('module'), 'TRANS_SMS');
   }
 });
 

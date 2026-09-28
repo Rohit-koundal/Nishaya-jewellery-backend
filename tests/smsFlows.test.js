@@ -13,7 +13,7 @@ const { MASTER_OWNER_PHONE } = require('../config/masterOwner');
 const providers = {
   twilio: { env: { SMS_ACCOUNT_SID: 'AC-test', SMS_AUTH_TOKEN: 'test-token', SMS_SENDER_ID: '+15005550006' }, reply: { sid: 'SM-test', status: 'queued' } },
   msg91: { env: { MSG91_AUTH_KEY: 'test-key', MSG91_TEMPLATE_ID: 'test-template' }, reply: { type: 'success', message: 'test-request' } },
-  '2factor': { env: { TWOFACTOR_API_KEY: 'test-key' }, reply: { Status: 'Success', Details: 'test-session' } },
+  '2factor': { env: { TWOFACTOR_API_KEY: 'test-key', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}. Do not share it.' }, reply: { Status: 'Success', Details: 'test-session' } },
   '2factor-transactional': {
     provider: '2factor',
     env: { TWOFACTOR_API_KEY: 'test-key', TWOFACTOR_DELIVERY_MODE: 'transactional_sms', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}. Do not share it.' },
@@ -35,6 +35,7 @@ test.beforeEach(async t => {
     Object.assign(process.env, previous);
   });
   t.mock.method(console, 'warn', () => {});
+  t.mock.method(console, 'info', () => {});
   // Only the isolated local Express app may receive real network traffic.
   const localFetch = global.fetch;
   t.mock.method(global, 'fetch', (url, options) => {
@@ -55,10 +56,9 @@ function mockDelivery(t, name) {
     state.count += 1;
     state.otp = name === 'twilio' ? options.body.get('Body').match(/\b\d{6}\b/)[0]
       : name === 'msg91' ? address.searchParams.get('otp')
-        : name === '2factor-transactional' ? options.body.get('msg').match(/\b\d{6}\b/)[0]
-          : name === '2factor' ? address.pathname.split('/')[6]
+        : provider === '2factor' ? options.body.get('msg').match(/\b\d{6}\b/)[0]
           : JSON.parse(options.body).variables_values;
-    if (name === '2factor-transactional') {
+    if (provider === '2factor') {
       assert.equal(address.pathname, '/API/R1/');
       assert.equal(options.body.get('module'), 'TRANS_SMS');
     }
@@ -128,6 +128,28 @@ for (const name of Object.keys(providers)) {
     assert.equal(delivery.count, 2);
   });
 }
+
+test('incomplete legacy 2Factor setup cannot authorize login; adding approved configuration restores SMS sending', async t => {
+  const delivery = mockDelivery(t, '2factor');
+  delivery.accepted = true;
+  delete process.env.TWOFACTOR_SMS_SENDER_ID;
+  delete process.env.TWOFACTOR_SMS_TEMPLATE;
+  process.env.TWOFACTOR_TEMPLATE_NAME = 'Legacy OTP';
+  const phone = '9876543210';
+  const failed = await request('/api/auth/send-otp', { method: 'POST', body: { phone } });
+  assert.equal(failed.status, 503);
+  assert.equal(failed.data.code, 'OTP_PROVIDER_NOT_CONFIGURED');
+  assert.equal(delivery.count, 0);
+  assert.equal(await Otp.countDocuments({ phone, isUsed: false }), 0);
+  const denied = await request('/api/auth/verify-otp', { method: 'POST', body: { phone, otp: '123456' } });
+  assert.equal(denied.status, 400);
+  Object.assign(process.env, providers['2factor'].env);
+  const sent = await request('/api/auth/resend-otp', { method: 'POST', body: { phone } });
+  assert.equal(sent.status, 200);
+  assert.equal(delivery.count, 1);
+  const verified = await request('/api/auth/verify-otp', { method: 'POST', body: { phone, otp: delivery.otp } });
+  assert.equal(verified.status, 200);
+});
 
 test('transactional SMS resend remains SMS, expires the previous code and preserves cooldown and single-use verification', async t => {
   const delivery = mockDelivery(t, '2factor-transactional');

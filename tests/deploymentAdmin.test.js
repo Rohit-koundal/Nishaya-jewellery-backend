@@ -16,6 +16,7 @@ test.after(stopTestEnvironment);
 const ownerPhone = '7988634769', oldPhone = '9816978086', ownerEmail = 'nishaya.in1111@gmail.com';
 test.beforeEach(async t => {
   await resetDatabase();
+  t.mock.method(console, 'info', () => {});
   const env = { ADMIN_PHONE_NUMBERS: ownerPhone, ADMIN_EMAIL: ownerEmail, OTP_MODE: 'demo', OTP_RESEND_COOLDOWN_SECONDS: '0', SMS_PROVIDER: 'mock', AUTH_REFRESH_TOKEN_BODY: 'true' };
   const previous = Object.fromEntries(Object.keys(env).map(key => [key, process.env[key]]));
   Object.assign(process.env, env);
@@ -34,15 +35,19 @@ function ok(result) { assert.equal(result.status, 200, JSON.stringify(result.dat
 function accessLifetime(token) { const claims = jwt.decode(token); return claims.exp - claims.iat; }
 async function ownerLogin(t) {
   process.env.OTP_MODE = 'production'; process.env.SMS_PROVIDER = '2factor';
-  const previousKey = process.env.TWOFACTOR_API_KEY; process.env.TWOFACTOR_API_KEY = 'isolated-test-key';
-  t.after(() => { if (previousKey === undefined) delete process.env.TWOFACTOR_API_KEY; else process.env.TWOFACTOR_API_KEY = previousKey; });
+  const configuration = { TWOFACTOR_API_KEY: 'isolated-test-key', TWOFACTOR_DELIVERY_MODE: 'transactional_sms', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}.' };
+  const previous = Object.fromEntries(Object.keys(configuration).map(key => [key, process.env[key]]));
+  Object.assign(process.env, configuration);
+  t.after(() => { for (const key of Object.keys(configuration)) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; } });
   const localFetch = global.fetch; let otp;
   t.mock.method(global, 'fetch', (url, options) => {
     if (String(url).startsWith(`${getBaseUrl()}/`)) return localFetch(url, options);
     const target = new URL(url);
     assert.equal(target.hostname, '2factor.in');
-    assert.equal(decodeURIComponent(target.pathname.split('/')[5]), `+91${ownerPhone}`);
-    otp = target.pathname.split('/')[6];
+    assert.equal(target.pathname, '/API/R1/');
+    assert.equal(options.body.get('module'), 'TRANS_SMS');
+    assert.equal(options.body.get('to'), `91${ownerPhone}`);
+    otp = options.body.get('msg').match(/\b\d{6}\b/)[0];
     return new Response(JSON.stringify({ Status: 'Success', Details: 'isolated-test-session' }), { status: 200 });
   });
   const sent = ok(await request('/api/auth/send-otp', { method: 'POST', body: { phone: ownerPhone } }));

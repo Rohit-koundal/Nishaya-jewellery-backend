@@ -20,6 +20,7 @@ test.beforeEach(t => {
     Object.assign(process.env, previous);
   });
   t.mock.method(console, 'warn', () => {});
+  t.mock.method(console, 'info', () => {});
   // Never use real account credentials, network requests, or paid SMS in tests.
   t.mock.method(global, 'fetch', async () => { throw new Error('Unexpected external request'); });
 });
@@ -33,7 +34,7 @@ test('transactional mode sends only TRANS_SMS with the exact backend OTP and DLT
   process.env.TWOFACTOR_DLT_TEMPLATE_ID = '9876543210987654321';
   process.env.TWOFACTOR_TEMPLATE_NAME = 'unused-legacy-template';
   const fetch = mockReply(t);
-  assert.deepEqual(await sms.sendOtp('+91 98765 43210', '654321', { requireReal: true }), { success: true, provider: '2factor' });
+  assert.deepEqual(await sms.sendOtp('+91 98765 43210', '654321', { requireReal: true }), { success: true, provider: '2factor', channel: 'sms' });
   assert.equal(fetch.mock.callCount(), 1);
   const [url, options] = fetch.mock.calls[0].arguments;
   assert.equal(url, 'https://2factor.in/API/R1/');
@@ -60,20 +61,23 @@ test('template punctuation, Unicode and whitespace are preserved; no auto-genera
   assert.deepEqual([...body.keys()], ['module', 'apikey', 'to', 'from', 'msg']);
 });
 
-test('default and explicit otp mode retain the existing manual OTP contract', async t => {
-  for (const mode of ['', 'otp', ' OTP ']) {
-    process.env.TWOFACTOR_DELIVERY_MODE = mode;
-    process.env.TWOFACTOR_TEMPLATE_NAME = 'Approved Template';
+test('unset, blank and explicit transactional mode only use TRANS_SMS, never the old OTP route', async t => {
+  for (const mode of [undefined, '', '  ', 'transactional_sms', ' TRANSACTIONAL_SMS ']) {
+    if (mode === undefined) delete process.env.TWOFACTOR_DELIVERY_MODE;
+    else process.env.TWOFACTOR_DELIVERY_MODE = mode;
+    process.env.TWOFACTOR_TEMPLATE_NAME = 'Ignored Legacy Template';
     const fetch = mockReply(t);
     assert.equal((await sms.sendOtp('9876543210', '654321')).success, true);
-    assert.equal(decodeURIComponent(fetch.mock.calls[0].arguments[0]), 'https://2factor.in/API/V1/private-unit-key/SMS/+919876543210/654321/Approved Template');
-    assert.equal(sms.getSmsConfiguration().deliveryMode, 'otp');
+    assert.equal(fetch.mock.calls[0].arguments[0], 'https://2factor.in/API/R1/');
+    assert.equal(fetch.mock.calls[0].arguments[1].body.get('module'), 'TRANS_SMS');
+    assert.equal(sms.getSmsConfiguration().deliveryMode, 'transactional_sms');
+    assert.equal(fetch.mock.callCount(), 1);
   }
 });
 
-test('mode spelling is normalized but unknown/voice modes fail closed, never returning to the legacy route', async t => {
+test('legacy OTP, voice and unknown modes fail closed, never returning to the removed route', async t => {
   const fetch = mockReply(t);
-  for (const mode of ['voice', 'auto', 'sms_only', 'transactional-smss', 'private-invalid-value']) {
+  for (const mode of ['otp', ' OTP ', 'sms_otp', 'voice', 'auto', 'sms_only', 'transactional-smss', 'private-invalid-value']) {
     process.env.TWOFACTOR_DELIVERY_MODE = mode;
     const configuration = sms.getSmsConfiguration();
     assert.equal(configuration.configured, false);
@@ -86,6 +90,31 @@ test('mode spelling is normalized but unknown/voice modes fail closed, never ret
   process.env.TWOFACTOR_DELIVERY_MODE = ' TRANSACTIONAL_SMS ';
   assert.equal((await sms.sendOtp('9876543210', '654321')).success, true);
   assert.equal(fetch.mock.calls[0].arguments[0], 'https://2factor.in/API/R1/');
+});
+
+test('old API-key/template-name configuration cannot send, and diagnostics identify the new required fields', async t => {
+  delete process.env.TWOFACTOR_DELIVERY_MODE;
+  delete process.env.TWOFACTOR_SMS_SENDER_ID;
+  delete process.env.TWOFACTOR_SMS_TEMPLATE;
+  process.env.TWOFACTOR_TEMPLATE_NAME = 'Legacy OTP Template';
+  const fetch = mockReply(t);
+  const configuration = sms.getSmsConfiguration();
+  assert.equal(configuration.deliveryMode, 'transactional_sms');
+  assert.equal(configuration.configured, false);
+  assert.deepEqual(configuration.missing, ['TWOFACTOR_SMS_SENDER_ID', 'TWOFACTOR_SMS_TEMPLATE']);
+  assert.deepEqual(await sms.sendOtp('9876543210', '654321'), { success: false, code: 'OTP_PROVIDER_NOT_CONFIGURED' });
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
+test('the pre-request log contains only the fixed route, never secrets, OTP or recipient', async t => {
+  const log = t.mock.method(console, 'info', () => {});
+  const fetch = t.mock.method(global, 'fetch', async () => {
+    assert.equal(log.mock.callCount(), 1, 'Diagnostic is emitted before the provider request');
+    return { ok: true, status: 200, json: async () => accepted };
+  });
+  await sms.sendOtp('9876543210', '654321');
+  assert.deepEqual(log.mock.calls.map(call => call.arguments), [['[2Factor] deliveryMode:', 'transactional_sms']]);
+  assert.equal(fetch.mock.callCount(), 1);
 });
 
 for (const field of ['TWOFACTOR_API_KEY', 'TWOFACTOR_SMS_SENDER_ID', 'TWOFACTOR_SMS_TEMPLATE']) {
