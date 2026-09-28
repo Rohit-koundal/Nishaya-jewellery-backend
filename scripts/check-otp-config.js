@@ -9,5 +9,10 @@ const { getSmsConfiguration } = require('../services/smsService');
 const configuration = getSmsConfiguration();
 const otpMode = getOtpMode();
 const ready = otpMode === 'production' && configuration.configured;
-console.log(JSON.stringify({ ...configuration, otpMode, ready, note: 'Configuration presence only; credentials, approved template and real delivery still need a controlled live test.' }, null, 2));
+console.log(JSON.stringify({
+  ...configuration, otpMode, ready,
+  ...(configuration.provider === '2factor' && configuration.deliveryMode === 'otp'
+    ? { warning: 'The legacy OTP route is provider-managed; its SMS label is not proof of handset delivery channel. See TWOFACTOR_SMS_DELIVERY.md for the opt-in transactional SMS route.' } : {}),
+  note: 'Local configuration checks only; credentials, DLT/sender approval and real SMS delivery still need a controlled live test.',
+}, null, 2));
 if (!ready) process.exitCode = 1;

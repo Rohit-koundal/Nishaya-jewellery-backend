@@ -18,8 +18,14 @@ function getAdapter(name) { return isRealSmsProvider(name) ? providers[normalize
 function getSmsConfiguration() {
   const name = getConfiguredProvider();
   const adapter = getAdapter(name);
-  const missing = adapter ? adapter.getConfiguration().missing : ['SMS_PROVIDER'];
-  return { provider: adapter ? name : name === 'mock' ? 'mock' : 'unconfigured', supported: Boolean(adapter), configured: Boolean(adapter) && missing.length === 0, missing };
+  const configuration = adapter?.getConfiguration();
+  const missing = configuration?.missing || ['SMS_PROVIDER'];
+  const invalid = configuration?.invalid || [];
+  return {
+    provider: adapter ? name : name === 'mock' ? 'mock' : 'unconfigured',
+    supported: Boolean(adapter), configured: Boolean(adapter) && missing.length === 0 && invalid.length === 0, missing,
+    ...(configuration?.deliveryMode ? { deliveryMode: configuration.deliveryMode, invalid } : {}),
+  };
 }
 
 module.exports = { getAdapter, getConfiguredProvider, getSmsConfiguration, isRealSmsProvider, normalizeProvider };

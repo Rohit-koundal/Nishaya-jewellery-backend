@@ -26,7 +26,7 @@ function providerError(code = 'OTP_DELIVERY_UNAVAILABLE', providerCode) {
 }
 
 function requireConfiguration(configuration) {
-  if (configuration.missing.length) throw providerError('OTP_PROVIDER_NOT_CONFIGURED');
+  if (configuration.missing.length || configuration.invalid?.length) throw providerError('OTP_PROVIDER_NOT_CONFIGURED');
   return configuration.values;
 }
 
