@@ -32,11 +32,12 @@ function safeProviderResponse(data, sensitive = []) {
   };
 }
 
-function createDeliveryAttempt({ apiKey, requestId, sensitive = [] }) {
+function createDeliveryAttempt({ apiKey, requestId, deliveryMode = 'transactional_sms', sensitive = [] }) {
   const startedAt = Date.now();
   const supportReference = crypto.randomUUID();
   const safeRequestId = UUID.test(String(requestId || '')) ? safeProviderReference(requestId, [apiKey, ...sensitive]) : null;
-  const base = { supportReference, provider: '2factor', channel: 'sms', deliveryMode: 'transactional_sms', accountFingerprint: accountFingerprint(apiKey) };
+  const safeMode = ['transactional_sms', 'otp_sms'].includes(deliveryMode) ? deliveryMode : 'invalid';
+  const base = { supportReference, provider: '2factor', channel: 'sms', deliveryMode: safeMode, accountFingerprint: accountFingerprint(apiKey) };
   return {
     finish(status, { reference, reason = null, httpStatus, providerResponse } = {}) {
       const providerReference = safeProviderReference(reference, [apiKey, ...sensitive]);

@@ -25,6 +25,7 @@ function getSmsConfiguration() {
     provider: adapter ? name : name === 'mock' ? 'mock' : 'unconfigured',
     supported: Boolean(adapter), configured: Boolean(adapter) && missing.length === 0 && invalid.length === 0, missing,
     ...(configuration?.deliveryMode ? { deliveryMode: configuration.deliveryMode, invalid } : {}),
+    ...(configuration?.supportedDeliveryModes ? { supportedDeliveryModes: configuration.supportedDeliveryModes } : {}),
   };
 }
 

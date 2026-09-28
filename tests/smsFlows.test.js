@@ -19,6 +19,11 @@ const providers = {
     env: { TWOFACTOR_API_KEY: 'test-key', TWOFACTOR_DELIVERY_MODE: 'transactional_sms', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}. Do not share it.', TWOFACTOR_DLT_ENTITY_ID: '1234567890123456789', TWOFACTOR_DLT_TEMPLATE_ID: '9876543210987654321' },
     reply: { Status: 'Success', Details: '09cfe5b29d000018a3acb36000000001' },
   },
+  '2factor-otp-sms': {
+    provider: '2factor',
+    env: { TWOFACTOR_API_KEY: 'test-key', TWOFACTOR_DELIVERY_MODE: 'otp_sms', TWOFACTOR_TEMPLATE_NAME: 'NISHAYA_VERIFY', TWOFACTOR_OTP_SMS_ONLY_CONFIRMED: 'true' },
+    reply: { Status: 'Success', Details: '11111111-2222-3333-4444-555555555555' },
+  },
   fast2sms: { env: { FAST2SMS_API_KEY: 'test-key' }, reply: { return: true, request_id: 'test-request' } },
 };
 
@@ -56,11 +61,17 @@ function mockDelivery(t, name) {
     state.count += 1;
     state.otp = name === 'twilio' ? options.body.get('Body').match(/\b\d{6}\b/)[0]
       : name === 'msg91' ? address.searchParams.get('otp')
-        : provider === '2factor' ? options.body.get('msg').match(/\b\d{6}\b/)[0]
+        : provider === '2factor' ? name === '2factor-otp-sms' ? decodeURIComponent(address.pathname.split('/')[6]) : options.body.get('msg').match(/\b\d{6}\b/)[0]
           : JSON.parse(options.body).variables_values;
     if (provider === '2factor') {
-      assert.equal(address.pathname, '/API/R1/');
-      assert.equal(options.body.get('module'), 'TRANS_SMS');
+      if (name === '2factor-otp-sms') {
+        assert.equal(options.method, 'GET');
+        assert.equal(address.pathname.split('/')[4], 'SMS');
+        assert.equal(address.pathname.split('/')[7], 'NISHAYA_VERIFY');
+      } else {
+        assert.equal(address.pathname, '/API/R1/');
+        assert.equal(options.body.get('module'), 'TRANS_SMS');
+      }
     }
     assert.match(state.otp, /^\d{6}$/);
     return new Response(JSON.stringify(state.accepted ? providers[name].reply : { message: 'private-account-data' }), { status: state.accepted ? 200 : 401 });
@@ -95,6 +106,7 @@ for (const name of Object.keys(providers)) {
         assert.equal(sent.data.deliveryStatus, 'accepted');
         assert.equal(sent.data.supportReference, record.delivery.supportReference);
         assert.equal(record.delivery.providerReference, providers[name].reply.Details);
+        assert.equal(record.delivery.deliveryMode, name === '2factor-otp-sms' ? 'otp_sms' : 'transactional_sms');
         assert.equal(sent.data.providerReference, undefined);
         assert.equal(sent.data.accountFingerprint, undefined);
         assert.match(sent.data.message, /requested/i);
@@ -203,6 +215,47 @@ test('transactional SMS resend remains SMS, expires the previous code and preser
   assert.equal((await verify(delivery.otp)).status, 400);
   assert.equal(delivery.count, 2);
 });
+
+for (const [initialMode, nextMode] of [
+  ['2factor-transactional', '2factor-otp-sms'],
+  ['2factor-otp-sms', '2factor-transactional'],
+]) {
+  test(`${initialMode} to ${nextMode}: resend preserves cooldown and invalidates only the superseded code`, async t => {
+    const firstDelivery = mockDelivery(t, initialMode);
+    firstDelivery.accepted = true;
+    const phone = '9876543210';
+    let generated = 0;
+    t.mock.method(require('node:crypto'), 'randomInt', () => [654321, 123456][generated++]);
+    // The controller's in-memory phone/IP limiter survives database cleanup.
+    const headers = { 'X-Forwarded-For': initialMode === '2factor-otp-sms' ? '192.0.2.21' : '192.0.2.20' };
+    // A customer-supplied mode must never override backend configuration.
+    const send = path => request(`/api/auth/${path}`, { method: 'POST', body: { phone, deliveryMode: 'voice' }, headers });
+    const verify = otp => request('/api/auth/verify-otp', { method: 'POST', body: { phone, otp } });
+    assert.equal((await send('send-otp')).status, 200);
+    const previousOtp = firstDelivery.otp;
+    assert.equal(firstDelivery.count, 1);
+
+    const nextDelivery = mockDelivery(t, nextMode);
+    nextDelivery.accepted = true;
+    assert.equal((await send('resend-otp')).status, 429);
+    assert.equal(nextDelivery.count, 0, 'switching delivery mode must not bypass cooldown');
+    process.env.OTP_RESEND_COOLDOWN_SECONDS = '0';
+    const resent = await send('resend-otp');
+    assert.equal(resent.status, 200);
+    assert.equal(nextDelivery.count, 1);
+    assert.notEqual(nextDelivery.otp, previousOtp);
+    const record = await Otp.findOne({ phone, isUsed: false });
+    assert.equal(record.delivery.deliveryMode, nextMode === '2factor-otp-sms' ? 'otp_sms' : 'transactional_sms');
+    assert.equal(record.delivery.supportReference, resent.data.supportReference);
+
+    process.env.TWOFACTOR_DELIVERY_MODE = 'invalid-after-send';
+    assert.equal((await verify(previousOtp)).status, 400);
+    assert.equal((await verify(nextDelivery.otp)).status, 200);
+    assert.equal((await verify(nextDelivery.otp)).status, 400);
+    assert.equal(firstDelivery.count, 1);
+    assert.equal(nextDelivery.count, 1, 'verification must remain local after a mode change');
+  });
+}
 
 test('client handover recognizes all configured providers and still requires locked production configuration', async () => {
   process.env.NODE_ENV = 'production';

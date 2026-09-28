@@ -1,5 +1,6 @@
 const { XMLParser, XMLValidator } = require('fast-xml-parser');
 const { accountFingerprint, safeProviderReference } = require('../otpDeliveryDiagnostics');
+const { getDeliveryMode } = require('./twoFactorProvider');
 
 const MAX_BYTES = 64 * 1024;
 const parser = new XMLParser({ ignoreAttributes: true, parseTagValue: false, processEntities: false });
@@ -58,6 +59,9 @@ async function boundedText(response) {
 }
 
 async function getDeliveryReport(reference, { expectedAccountFingerprint } = {}) {
+  // This tool supports only transactional mode; OTP references belong in the
+  // SMS OTP dashboard, including after a later switch back to transactional mode.
+  if (getDeliveryMode() !== 'transactional_sms') return unknown('REPORT_MODE_UNSUPPORTED');
   const apiKey = String(process.env.TWOFACTOR_API_KEY || '').trim();
   const providerReference = safeProviderReference(reference, [apiKey]);
   if (!apiKey) return unknown('API_KEY_MISSING');

@@ -13,7 +13,7 @@ async function main() {
   const report = await getDeliveryReport(reference, { expectedAccountFingerprint: accountOption?.slice('--account='.length) });
   console.log(JSON.stringify({
     ...report,
-    note: 'Read-only provider report; no SMS sent. Unknown/not-found does not mean failed or delivered. Confirm the same account and ask 2Factor to trace the reference if this R1 request has no report.',
+    note: 'Read-only transactional report; no SMS sent. REPORT_MODE_UNSUPPORTED: use SMS OTP dashboard logs for otp_sms, not this transactional endpoint. Unknown/not-found does not mean failed or delivered. Match the sending account, mode and reference.',
   }, null, 2));
   process.exitCode = report.deliveryStatus === 'delivered' ? 0 : 2;
 }

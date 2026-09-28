@@ -81,9 +81,9 @@ test('unset, blank and explicit transactional mode only use TRANS_SMS, never the
   }
 });
 
-test('legacy OTP, voice and unknown modes fail closed, never returning to the removed route', async t => {
+test('ambiguous OTP, voice and unknown modes fail closed without choosing another route', async t => {
   const fetch = mockReply(t);
-  for (const mode of ['otp', ' OTP ', 'sms_otp', 'voice', 'auto', 'sms_only', 'transactional-smss', 'private-invalid-value']) {
+  for (const mode of ['otp', ' OTP ', 'voice', 'auto', 'sms_only', 'transactional-smss', 'private-invalid-value']) {
     process.env.TWOFACTOR_DELIVERY_MODE = mode;
     const configuration = sms.getSmsConfiguration();
     assert.equal(configuration.configured, false);

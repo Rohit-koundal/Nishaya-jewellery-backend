@@ -1,10 +1,32 @@
 const { readConfiguration, requireConfiguration, providerError, otpRecipient, requestJson } = require('./smsProviderUtils');
 const { createDeliveryAttempt, safeProviderResponse } = require('../otpDeliveryDiagnostics');
 
+const SUPPORTED_DELIVERY_MODES = Object.freeze(['transactional_sms', 'otp_sms']);
+
+function getDeliveryMode() {
+  const selected = String(process.env.TWOFACTOR_DELIVERY_MODE || '').trim().toLowerCase() || 'transactional_sms';
+  const mode = selected === 'sms_otp' ? 'otp_sms' : selected;
+  return SUPPORTED_DELIVERY_MODES.includes(mode) ? mode : 'invalid';
+}
+
 function getConfiguration() {
-  // This adapter has one transport only. A legacy/unknown explicit mode must
-  // fail closed rather than re-enable the provider-managed OTP product.
-  const mode = String(process.env.TWOFACTOR_DELIVERY_MODE || '').trim().toLowerCase() || 'transactional_sms';
+  // Read at request time, not module import. A mode switch never reuses the
+  // other product's configuration or silently falls back to its endpoint.
+  const mode = getDeliveryMode();
+  if (mode === 'invalid') return { values: {}, missing: [], invalid: ['TWOFACTOR_DELIVERY_MODE'], deliveryMode: mode, supportedDeliveryModes: SUPPORTED_DELIVERY_MODES };
+  if (mode === 'otp_sms') {
+    const configuration = readConfiguration({
+      apiKey: ['TWOFACTOR_API_KEY'], templateName: ['TWOFACTOR_TEMPLATE_NAME'],
+      smsOnlyConfirmed: ['TWOFACTOR_OTP_SMS_ONLY_CONFIRMED'],
+    });
+    const invalid = [];
+    const { templateName, smsOnlyConfirmed } = configuration.values;
+    if (templateName && !/^[a-z\d][a-z\d _-]{0,99}$/i.test(templateName)) invalid.push('TWOFACTOR_TEMPLATE_NAME');
+    // This is an operator attestation AFTER 2Factor disables voice fallback for
+    // this account. It is not an API parameter and cannot disable provider calls.
+    if (smsOnlyConfirmed && smsOnlyConfirmed.toLowerCase() !== 'true') invalid.push('TWOFACTOR_OTP_SMS_ONLY_CONFIRMED');
+    return { ...configuration, invalid, deliveryMode: mode, supportedDeliveryModes: SUPPORTED_DELIVERY_MODES };
+  }
   const configuration = readConfiguration({
     apiKey: ['TWOFACTOR_API_KEY'], sender: ['TWOFACTOR_SMS_SENDER_ID'], message: ['TWOFACTOR_SMS_TEMPLATE'],
   }, {
@@ -13,7 +35,6 @@ function getConfiguration() {
     entityId: ['TWOFACTOR_DLT_ENTITY_ID'], templateId: ['TWOFACTOR_DLT_TEMPLATE_ID'],
   });
   const invalid = [];
-  if (mode !== 'transactional_sms') invalid.push('TWOFACTOR_DELIVERY_MODE');
   // DLT content must be sent exactly as approved, including whitespace. Only
   // the application's single {otp} placeholder is substituted at send time.
   configuration.values.message = String(process.env.TWOFACTOR_SMS_TEMPLATE || '');
@@ -24,29 +45,37 @@ function getConfiguration() {
   }
   if (entityId && !/^\d{1,64}$/.test(entityId)) invalid.push('TWOFACTOR_DLT_ENTITY_ID');
   if (templateId && !/^\d{1,64}$/.test(templateId)) invalid.push('TWOFACTOR_DLT_TEMPLATE_ID');
-  return { ...configuration, invalid, deliveryMode: mode === 'transactional_sms' ? mode : 'invalid' };
+  return { ...configuration, invalid, deliveryMode: mode, supportedDeliveryModes: SUPPORTED_DELIVERY_MODES };
 }
 
-async function sendOtp(phone, otp, { requestId } = {}) {
-  const configuration = getConfiguration();
-  const { apiKey, sender, message, entityId, templateId } = requireConfiguration(configuration);
-  const recipient = otpRecipient(phone, otp, { indiaOnly: true });
-  const attempt = createDeliveryAttempt({ apiKey, requestId, sensitive: [String(otp), recipient, recipient.slice(1), recipient.slice(-10)] });
-  // Dedicated transactional SMS only; never fall back to the OTP/voice product.
-  // https://documenter.getpostman.com/view/301893/TWDamFGh (Send Single SMS)
+function buildRequest(mode, { apiKey, sender, message, entityId, templateId, templateName }, recipient, otp) {
+  if (mode === 'otp_sms') {
+    // Official "Send OTP (Manual Generation)": keep backend-generated OTP and
+    // verification unchanged. URL contains secrets; never log it or fetch errors.
+    const segments = [apiKey, 'SMS', recipient, String(otp), templateName].map(encodeURIComponent);
+    return { url: `https://2factor.in/API/V1/${segments.join('/')}`, options: { method: 'GET', cache: 'no-store', headers: { Accept: 'application/json' } } };
+  }
+  // Official "Send Single SMS". No voice endpoint or cross-mode retry.
   const body = new URLSearchParams({
     module: 'TRANS_SMS', apikey: apiKey, to: recipient.slice(1), from: sender,
     msg: message.replace('{otp}', String(otp)),
   });
   if (entityId) body.set('peid', entityId);
   if (templateId) body.set('ctid', templateId);
+  return { url: 'https://2factor.in/API/R1/', options: { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body } };
+}
+
+async function sendOtp(phone, otp, { requestId } = {}) {
+  const configuration = getConfiguration();
+  const values = requireConfiguration(configuration);
+  const recipient = otpRecipient(phone, otp, { indiaOnly: true });
+  const attempt = createDeliveryAttempt({ apiKey: values.apiKey, requestId, deliveryMode: configuration.deliveryMode, sensitive: [String(otp), recipient, recipient.slice(1), recipient.slice(-10)] });
+  const request = buildRequest(configuration.deliveryMode, values, recipient, otp);
   // Safe route diagnostic only: never log the key, recipient, OTP or request body.
   console.info('[2Factor] deliveryMode:', configuration.deliveryMode);
   let result;
   try {
-    result = await requestJson('https://2factor.in/API/R1/', {
-      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
-    });
+    result = await requestJson(request.url, request.options);
   } catch (error) {
     error.delivery = attempt.finish('unknown', { reason: 'NETWORK_OR_TIMEOUT' });
     throw error;
@@ -78,4 +107,4 @@ function failureReason(details, status, authFailed) {
   return status >= 500 ? 'PROVIDER_UNAVAILABLE' : 'PROVIDER_REJECTED_OR_INVALID_RESPONSE';
 }
 
-module.exports = { sendOtp, getConfiguration };
+module.exports = { sendOtp, getConfiguration, getDeliveryMode };
