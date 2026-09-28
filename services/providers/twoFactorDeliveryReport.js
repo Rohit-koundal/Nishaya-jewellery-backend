@@ -19,16 +19,17 @@ function parseDeliveryReport(text) {
   if (!rows.length || rows.length > 100) return unknown('REPORT_NOT_FOUND');
   const receipts = rows.map(row => {
     const raw = typeof row?.smsStatus?.statusDesc === 'string' ? row.smsStatus.statusDesc.trim().toUpperCase() : '';
+    const dltRejected = raw === 'DLT-CNT-REJECT';
     const status = raw === 'DELIVERED' ? 'delivered'
-      : ['FAILED', 'REJECTED', 'UNDELIVERED', 'UNDELIVERABLE', 'EXPIRED', 'DELETED'].includes(raw) ? 'failed'
+      : dltRejected || ['FAILED', 'REJECTED', 'UNDELIVERED', 'UNDELIVERABLE', 'EXPIRED', 'DELETED'].includes(raw) ? 'failed'
         : ['PENDING', 'QUEUED', 'ACCEPTED', 'ACCEPTD', 'SENT', 'SUBMITTED'].includes(raw) ? 'pending' : 'unknown';
     const number = value => /^\d{1,8}$/.test(String(value || '')) ? String(value) : null;
-    return { status, statusCode: number(row?.smsStatus?.statusId), errorCode: number(row?.smsError?.errorId), errorGroup: number(row?.smsError?.errorGroupId) };
+    return { status, statusCode: number(row?.smsStatus?.statusId), errorCode: number(row?.smsError?.errorId), errorGroup: number(row?.smsError?.errorGroupId), ...(dltRejected ? { providerCode: 'DLT-CNT-REJECT' } : {}) };
   });
   const deliveryStatus = receipts.every(row => row.status === 'delivered') ? 'delivered'
     : receipts.some(row => row.status === 'failed') ? 'failed'
       : receipts.every(row => ['pending', 'delivered'].includes(row.status)) ? 'pending' : 'unknown';
-  return { deliveryStatus, reportAvailable: true, reason: null, receipts };
+  return { deliveryStatus, reportAvailable: true, reason: receipts.some(row => row.providerCode === 'DLT-CNT-REJECT') ? 'DLT_CONTENT_REJECTED' : null, receipts };
 }
 
 async function boundedText(response) {

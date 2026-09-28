@@ -13,10 +13,10 @@ const { MASTER_OWNER_PHONE } = require('../config/masterOwner');
 const providers = {
   twilio: { env: { SMS_ACCOUNT_SID: 'AC-test', SMS_AUTH_TOKEN: 'test-token', SMS_SENDER_ID: '+15005550006' }, reply: { sid: 'SM-test', status: 'queued' } },
   msg91: { env: { MSG91_AUTH_KEY: 'test-key', MSG91_TEMPLATE_ID: 'test-template' }, reply: { type: 'success', message: 'test-request' } },
-  '2factor': { env: { TWOFACTOR_API_KEY: 'test-key', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}. Do not share it.' }, reply: { Status: 'Success', Details: '09cfe5b29d000018a3acb36000000001' } },
+  '2factor': { env: { TWOFACTOR_API_KEY: 'test-key', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}. Do not share it.', TWOFACTOR_DLT_ENTITY_ID: '1234567890123456789', TWOFACTOR_DLT_TEMPLATE_ID: '9876543210987654321' }, reply: { Status: 'Success', Details: '09cfe5b29d000018a3acb36000000001' } },
   '2factor-transactional': {
     provider: '2factor',
-    env: { TWOFACTOR_API_KEY: 'test-key', TWOFACTOR_DELIVERY_MODE: 'transactional_sms', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}. Do not share it.' },
+    env: { TWOFACTOR_API_KEY: 'test-key', TWOFACTOR_DELIVERY_MODE: 'transactional_sms', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}. Do not share it.', TWOFACTOR_DLT_ENTITY_ID: '1234567890123456789', TWOFACTOR_DLT_TEMPLATE_ID: '9876543210987654321' },
     reply: { Status: 'Success', Details: '09cfe5b29d000018a3acb36000000001' },
   },
   fast2sms: { env: { FAST2SMS_API_KEY: 'test-key' }, reply: { return: true, request_id: 'test-request' } },
@@ -164,8 +164,26 @@ test('incomplete legacy 2Factor setup cannot authorize login; adding approved co
   assert.equal(verified.status, 200);
 });
 
+test('SMS login without optional DLT IDs still requires provider acceptance and the actual OTP', async t => {
+  const delivery = mockDelivery(t, '2factor');
+  delete process.env.TWOFACTOR_DLT_ENTITY_ID;
+  delete process.env.TWOFACTOR_DLT_TEMPLATE_ID;
+  const phone = '9876543200';
+  const rejected = await request('/api/auth/send-otp', { method: 'POST', body: { phone } });
+  assert.equal(rejected.status, 503);
+  assert.equal(await Otp.countDocuments({ phone, isUsed: false }), 0);
+  delivery.accepted = true;
+  const sent = await request('/api/auth/resend-otp', { method: 'POST', body: { phone } });
+  assert.equal(sent.status, 200);
+  assert.equal(sent.data.deliveryStatus, 'accepted');
+  assert.equal(delivery.count, 2);
+  assert.equal((await request('/api/auth/verify-otp', { method: 'POST', body: { phone, otp: delivery.otp } })).status, 200);
+});
+
 test('transactional SMS resend remains SMS, expires the previous code and preserves cooldown and single-use verification', async t => {
   const delivery = mockDelivery(t, '2factor-transactional');
+  delete process.env.TWOFACTOR_DLT_ENTITY_ID;
+  delete process.env.TWOFACTOR_DLT_TEMPLATE_ID;
   delivery.accepted = true;
   const phone = '9876543210';
   let generated = 0;

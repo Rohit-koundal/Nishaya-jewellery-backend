@@ -6,7 +6,8 @@ const adapter = require('../services/providers/twoFactorProvider');
 const valid = {
   SMS_PROVIDER: '2factor', NODE_ENV: 'production', OTP_MODE: 'production',
   TWOFACTOR_DELIVERY_MODE: 'transactional_sms', TWOFACTOR_API_KEY: 'private-unit-key',
-  TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Nishaya verification code: {otp}. Do not share it.',
+  TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: '{otp} is your OTP to verify your phone number at Nishaya Jewellery. Please do not share this OTP with anyone.',
+  TWOFACTOR_DLT_ENTITY_ID: '1234567890123456789', TWOFACTOR_DLT_TEMPLATE_ID: '9876543210987654321',
 };
 const accepted = { Status: 'Success', Details: '09cfe5b29d000018a3acb36000000001' };
 
@@ -49,7 +50,7 @@ test('transactional mode sends only TRANS_SMS with the exact backend OTP and DLT
   assert.equal(options.headers['Content-Type'], 'application/x-www-form-urlencoded');
   assert.deepEqual(Object.fromEntries(options.body), {
     module: 'TRANS_SMS', apikey: 'private-unit-key', to: '919876543210', from: 'NISHAY',
-    msg: 'Nishaya verification code: 654321. Do not share it.',
+    msg: '654321 is your OTP to verify your phone number at Nishaya Jewellery. Please do not share this OTP with anyone.',
     peid: '1234567890123456789', ctid: '9876543210987654321',
   });
   assert.ok(!url.includes('private-unit-key'));
@@ -63,7 +64,7 @@ test('template punctuation, Unicode and whitespace are preserved; no auto-genera
   const body = new URLSearchParams(String(fetch.mock.calls[0].arguments[1].body));
   assert.equal(body.get('msg'), template.replace('{otp}', '123456'));
   assert.equal(body.get('to'), '919198765432', 'A subscriber number starting with 91 retains all ten digits');
-  assert.deepEqual([...body.keys()], ['module', 'apikey', 'to', 'from', 'msg']);
+  assert.deepEqual([...body.keys()], ['module', 'apikey', 'to', 'from', 'msg', 'peid', 'ctid']);
 });
 
 test('unset, blank and explicit transactional mode only use TRANS_SMS, never the old OTP route', async t => {
@@ -147,6 +148,7 @@ test('unresolved/multiple placeholders, invalid sender and invalid DLT IDs canno
     ['TWOFACTOR_SMS_TEMPLATE', '{otp} for #VAR2#'], ['TWOFACTOR_SMS_SENDER_ID', 'NI'],
     ['TWOFACTOR_SMS_SENDER_ID', 'NISHAYA'],
     ['TWOFACTOR_DLT_ENTITY_ID', 'not-an-id'], ['TWOFACTOR_DLT_TEMPLATE_ID', 'bad-id'],
+    ['TWOFACTOR_DLT_TEMPLATE_ID', 'NISHAYA_VERIFY'], ['TWOFACTOR_SMS_TEMPLATE', 'Your verification code for Nishaya Jewellery is #VAR1#. Do not share this code with anyone.'],
   ];
   for (const [field, value] of invalid) {
     const previous = process.env[field];
@@ -157,6 +159,41 @@ test('unresolved/multiple placeholders, invalid sender and invalid DLT IDs canno
     if (previous === undefined) delete process.env[field]; else process.env[field] = previous;
   }
   assert.equal(fetch.mock.callCount(), 0);
+});
+
+test('optional DLT IDs may be omitted without a new config gate or changing the SMS-only endpoint', async t => {
+  delete process.env.TWOFACTOR_DLT_ENTITY_ID;
+  delete process.env.TWOFACTOR_DLT_TEMPLATE_ID;
+  process.env.TWOFACTOR_ENTITY_ID = '1234567890123456789';
+  process.env.TWOFACTOR_TEMPLATE_ID = '9876543210987654321';
+  process.env.TWOFACTOR_TEMPLATE_NAME = 'NISHAYA_VERIFY';
+  const fetch = mockReply(t);
+  for (const empty of [undefined, '', '   ']) {
+    for (const field of ['TWOFACTOR_DLT_ENTITY_ID', 'TWOFACTOR_DLT_TEMPLATE_ID']) {
+      if (empty === undefined) delete process.env[field]; else process.env[field] = empty;
+    }
+    assert.deepEqual(sms.getSmsConfiguration().missing, []);
+    assert.equal(sms.getSmsConfiguration().configured, true);
+    assert.equal((await adapter.sendOtp('9876543210', '654321')).success, true);
+    const [url, options] = fetch.mock.calls.at(-1).arguments;
+    assert.equal(url, 'https://2factor.in/API/R1/');
+    assert.deepEqual([...options.body.keys()], ['module', 'apikey', 'to', 'from', 'msg']);
+    assert.equal(options.body.get('module'), 'TRANS_SMS');
+  }
+  assert.equal(fetch.mock.callCount(), 3, 'One request per explicit send, no fallback');
+});
+
+test('approved Nishaya content matches byte-for-byte after replacing only the OTP variable', async t => {
+  const approved = 'XXXX is your OTP to verify your phone number at Nishaya Jewellery. Please do not share this OTP with anyone.';
+  const fetch = mockReply(t);
+  await adapter.sendOtp('919876543210', '654321');
+  const body = new URLSearchParams(String(fetch.mock.calls[0].arguments[1].body));
+  assert.deepEqual(Buffer.from(body.get('msg')), Buffer.from(approved.replace('XXXX', '654321')));
+  assert.equal(body.get('from'), 'NISHAY');
+  assert.equal(body.get('to'), '919876543210');
+  assert.equal(body.get('peid'), valid.TWOFACTOR_DLT_ENTITY_ID);
+  assert.equal(body.get('ctid'), valid.TWOFACTOR_DLT_TEMPLATE_ID);
+  assert.ok(!String(body).includes('NISHAYA_VERIFY'));
 });
 
 test('safe readiness reports the selected route and field names without exposing any configured values', () => {

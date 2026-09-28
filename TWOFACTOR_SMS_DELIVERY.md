@@ -36,23 +36,62 @@ The values in angle brackets are instructions, not usable credentials/content. I
 - `TWOFACTOR_SMS_TEMPLATE` is the full approved message text, **not** a template name or ID. Replace the approved OTP variable (for example `#VAR1#` in the provider form) with exactly one `{otp}` marker. Keep the remaining characters, punctuation and whitespace unchanged. Additional/unresolved `{name}` or `#VAR2#` placeholders are rejected locally. No sample message is supplied as a live default.
 - The application still generates and verifies its own six-digit code; it substitutes only `{otp}`. Do not switch to AUTOGEN.
 - Use a generic verification message suitable for all enabled flows: customer/admin login, phone verification and COD verification share this transport. Do not claim a different validity period from the backend's configured OTP expiry.
-- Optional `TWOFACTOR_DLT_ENTITY_ID` and `TWOFACTOR_DLT_TEMPLATE_ID` are passed as `peid` and `ctid`. Supply the approved numeric IDs if required for your account; only omit them if 2Factor confirms the account-side mapping is sufficient. These values are treated as strings, never converted to numbers.
+- **Optional, not an extra setup requirement:** `TWOFACTOR_DLT_ENTITY_ID` and `TWOFACTOR_DLT_TEMPLATE_ID` are passed as `peid` and `ctid` only when supplied, matching R1's official contract. The previously added mandatory-ID policy has been removed at the owner's request. Leave them unset unless 2Factor provides/requires explicit mapping for the account. Supplied non-numeric IDs still fail validation; never invent IDs or use `NISHAYA_VERIFY` as the numeric Content Template ID. IDs remain digit strings (1-64 digits), not JavaScript numbers. Omission does not bypass provider-side DLT validation.
+- Keep these existing `TWOFACTOR_DLT_*` names. `TWOFACTOR_ENTITY_ID`, `TWOFACTOR_TEMPLATE_ID`, and generic `SMS_ENTITY_ID`/`SMS_TEMPLATE_ID` are **not** aliases in this adapter.
 - `TWOFACTOR_TEMPLATE_NAME` is obsolete and ignored. It cannot replace `TWOFACTOR_SMS_TEMPLATE` or configure transactional SMS.
 - `SMS_REQUEST_TIMEOUT_MS` remains supported (15 seconds by default, bounded to 1-30 seconds). A timeout does not trigger another send because the first message may already have been accepted.
 - Only Indian mobile numbers are supported by this adapter. Input normalization, expiry, attempt limits, and owner verification requirements are preserved.
 
 Unset/blank `TWOFACTOR_DELIVERY_MODE` defaults to `transactional_sms`; explicitly setting that value is also supported. An existing value of `otp` or `sms_otp` must be removed or changed to `transactional_sms`. Legacy and unknown values fail closed; there is no `voice`, `auto`, or `sms_only` mode and no environment switch that restores the legacy route.
 
+## DLT-CNT-REJECT investigation (2026-09-28)
+
+The reported failure is a delivery-time content rejection, not evidence of a voice request. **The owner's latest APPROVED template table revealed a concrete text mismatch:** it starts `XXXX is your OTP to verify your phone number at Nishaya Jewellery.`, while the local configuration and previously reported outgoing SMS started `Your verification code for Nishaya Jewellery is ...`. The earlier comparison used a different message supplied in the conversation. The latest table supersedes it. The local `.env` message has now been aligned with the latest approved text, replacing only `XXXX` with `{otp}`. Sender remains `NISHAY`, mode remains `transactional_sms`, and DLT IDs remain optional. Render's actual environment has not been accessed or changed.
+
+Missing IDs are **not a proven cause of the operator rejection**. The official API permits omission, and the actual provider-side entity/header/content mapping is not available locally. Exact content can still be rejected if the operator is validating a different/unmapped template. Removing a local configuration gate does not resolve `DLT-CNT-REJECT`: 2Factor must confirm/fix the existing sender/content mapping or provide a documented provider-managed, SMS-only alternative. Do not start another registration solely because the IDs are absent locally. Only test fixtures, not real DLT IDs, are present in the inspected repository/local configuration.
+
+For the approved `NISHAYA_VERIFY` template, configure these exact Render values (no surrounding quotes):
+
+```dotenv
+TWOFACTOR_SMS_SENDER_ID=NISHAY
+TWOFACTOR_SMS_TEMPLATE={otp} is your OTP to verify your phone number at Nishaya Jewellery. Please do not share this OTP with anyone.
+```
+
+The latest approved table's `XXXX` is represented by this application's `{otp}` marker. No other character changes, and the backend still generates its existing six-digit OTP. The template name is a dashboard label, not a `msg` value and not a `ctid`. Update the exact message in Render as well: local `.env` changes are not deployed and inherited Render env values take precedence. There is no new live default or hardcoded ID in the implementation. The APPROVED table alone does not independently prove operator-DLT/R1 approval; if rejection continues after correcting the message, 2Factor must confirm that route's mapping.
+
+No extra mandatory DLT variables are needed for the application to submit a request. If 2Factor specifically supplies explicit mapping IDs, configure them in the backend environment only. Otherwise ask support to resolve any continuing `DLT-CNT-REJECT` against the existing `NISHAY` / `NISHAYA_VERIFY` entry and request reference. Only the message line in the local backend `.env` was updated from the latest owner-provided approval details; keys and other private configuration were untouched. No production environment has been edited.
+
+The public OTP endpoint documentation does not provide a verified no-voice switch, and the provider's developer portal describes automatic voice fallback. Therefore the app has **not** been switched back to that endpoint, AUTOGEN, or an invented `sms_only` API parameter. A support-confirmed SMS-only contract/account setting is needed before changing transports. The current implementation remains on the dedicated transactional SMS product, with no voice or cross-provider fallback in application code.
+
+### Inspected execution/configuration map
+
+| Files | Role / finding |
+| --- | --- |
+| `server.js`, `config/env.js` | Load `backend/.env`, then cwd `.env`, with dotenv's default `override: false`; inherited Render environment wins, even if set to an empty string. `OTP_MODE` must be explicitly `production` (default is demo). |
+| `routes/authRoutes.js`, `controllers/authController.js` | Send and resend share `sendOtp`; phone-change verification shares the same SMS sender. Production failure invalidates the unsent code rather than falling back. Rate limits/cooldown remain unchanged. |
+| `services/otpService.js`, `models/Otp.js`, `utils/phoneUtils.js` | Backend creates/hashes/expires/consumes the six-digit OTP. Indian numbers normalize to ten subscriber digits; adapter sends `91` + those digits, without `+`. No provider verification/voice endpoint is called. |
+| `services/smsService.js`, `services/providers/smsProviderRegistry.js` | Resolve the selected provider from `SMS_PROVIDER` at call time. `2factor`, `twofactor`, `two-factor` select the same adapter. Other installed providers are not fallback routes. |
+| `services/providers/smsProviderUtils.js`, `services/providers/twoFactorProvider.js` | `getConfiguration()` reads process.env at send time. `readConfiguration()` marks required missing fields; `requireConfiguration()` rejects missing/invalid config. Only `POST /API/R1/`, `module=TRANS_SMS`, can send a 2Factor OTP. Numeric DLT fields are optional and sent only when supplied. Message whitespace is preserved. |
+| `services/otpDeliveryDiagnostics.js`, `services/providers/twoFactorDeliveryReport.js` | Safe acceptance/rejection logs; read-only report lookup distinguishes later DLT rejection from acceptance. `/API/V1/.../RPT/TSMS/...` is a GET report endpoint, not an OTP/voice send. |
+| `scripts/check-otp-config.js`, `scripts/check-otp-delivery.js` | Local readiness and optional read-only provider report tools; neither sends a code. Config check mirrors backend dotenv loading. |
+| `services/codVerificationService.js`, `controllers/orderController.js`, `routes/orderRoutes.js` | Order verification shares SMS sending. Inspected only; no order/controller/auth changes in this patch. |
+| `services/emailService.js`, `services/clientHandoverService.js` | Separate email OTP transport and provider readiness consumer; unchanged. |
+| `src/context/AuthContext.jsx`, `src/store/apiSlice.js`, `src/services/api.js`, `src/utils/loginOtpStorage.js`, customer `Login.jsx`, `ProfileDetails.jsx`, `Checkout.jsx`, `OrderDetail.jsx`, admin `AdminLogin.jsx` | Frontend callers/OTP UI inspected for request paths; no frontend changes in this patch. |
+
+For the current DLT-only patch, changed runtime files are `services/providers/twoFactorProvider.js`, `services/otpDeliveryDiagnostics.js`, `services/providers/twoFactorDeliveryReport.js`, and `scripts/check-otp-config.js`. Tests and this guide are the only other tracked changes. No authentication, OTP lifetime, verification, frontend, order, retry or provider-selection behavior is modified.
+
 ## Deployment and controlled verification
 
 1. Obtain and verify the approved transactional configuration **before deployment**. Existing OTP records remain compatible; no data migration is needed.
-2. Deploy the backend for diagnostics and build/deploy the frontend for support references, accurate delivery wording and the mobile countdown fix. The API changes are additive, so an older frontend remains compatible. Remove/change any explicit legacy delivery mode. Do not place any provider key in frontend variables.
+2. Deploy the **backend only**. No additional mandatory DLT IDs, frontend build/deployment, migration or dependency installation are introduced. Remove/change any explicit legacy delivery mode. Do not place any provider key in frontend variables. Deployment alone does not resolve an outstanding provider rejection.
 3. From the backend environment run `npm run check:otp`. It makes no network requests and sends no SMS. Expect `provider: "2factor"`, `deliveryMode: "transactional_sms"`, `ready: true`, and empty `missing`/`invalid` arrays. This checks local configuration only, not account approval, balance, credentials or handset delivery.
 4. With the recipient's consent, request one OTP and confirm it arrives as **SMS** with the approved sender and correct code. Inspect **Transactional SMS** logs, not the old SMS OTP or Voice OTP log. Provider acceptance alone is not proof of SMS delivery.
 5. Verify the received code, resend after the existing cooldown, and check both customer and owner/admin login. Check COD/phone-change verification if used. Do not repeatedly send test OTPs after a timeout; check the provider logs first.
 6. Confirm no call accompanies the test. If a call persists on this separate endpoint, escalate the transactional request trace to 2Factor; do not claim the issue is solved or add an undocumented API flag.
 
 Before each provider request the backend still logs `[2Factor] deliveryMode: transactional_sms`. A subsequent structured `otp.delivery` event records the safe reference and acceptance result. Keys, messages, OTPs, phone numbers, request bodies and raw provider errors are never logged. A successful adapter result includes `channel: "sms"`, indicating the requested transport, not a verified handset receipt.
+
+An immediate rejection now also logs `httpStatus`, allowlisted `providerStatus`, `providerCode` (including exact `DLT-CNT-REJECT`), safe recognized `providerDetails`, and `providerDetailsRedacted`. Free-form/unknown details, echoed secrets and extra response fields are omitted, not dumped. `DLT-CNT-REJECT` yields `reason: "DLT_CONTENT_REJECTED"` and never counts as acceptance, even if HTTP is 200. These provider-only fields do not go to the customer API response. A later asynchronous operator rejection cannot appear in the original send response: trace its reference in Transactional SMS logs or use the read-only report command. This patch does not add automatic polling/retries or fabricate a receipt.
 
 Setting `otp` does **not** restore the old route. Rolling back to older backend code is a separate deployment decision and can restore the reported call behavior; it is not an SMS-only workaround. Do not enable demo OTP to get around provider failures.
 
@@ -75,7 +114,7 @@ Setting `otp` does **not** restore the old route. Rolling back to older backend 
    | --- | --- |
    | `delivered` | The provider report says delivered. Confirm the destination privately and ask the customer to check the SMS spam/blocked inbox; it is not proof that the person read it. |
    | `pending` | Provider delivery is still pending. Do not repeatedly send more codes. |
-   | `failed` | Use the report's numeric error code and provider reference with 2Factor support; fix the relevant account/sender/template/operator issue. |
+   | `failed` | Use the report's numeric error code and provider reference with 2Factor support; fix the relevant account/sender/template/operator issue. `DLT-CNT-REJECT` in a report is now explicitly `failed`, with that exact code and `DLT_CONTENT_REJECTED`, not `unknown`. |
    | `unknown`, `REPORT_NOT_FOUND` or `REPORT_UNAVAILABLE` | No usable report is available. This is **not** evidence of either delivery or failure. Some R1 accounts may not expose their references through the older documented transactional report API. Confirm with 2Factor support; no undocumented endpoint or fake status is used. |
    | `ACCOUNT_MISMATCH` | The command is using a different key from the sending deployment. Check the intended environment privately. No provider request was made. |
 
@@ -87,7 +126,7 @@ Provider diagnostics are also saved on the existing OTP record and expire with t
 
 ### Safe rejection reasons
 
-`AUTH_OR_PERMISSION`, `INSUFFICIENT_BALANCE`, `SENDER_NOT_APPROVED`, `TEMPLATE_REJECTED`, `DLT_CONFIGURATION`, `SERVICE_INACTIVE`, and `PROVIDER_RATE_LIMIT` are allowlisted categories inferred from the send response, not raw messages. `NETWORK_OR_TIMEOUT` is an **unknown** outcome because the provider might have accepted the request before the connection failed. No automatic resend, voice fallback or provider switch is attempted.
+`AUTH_OR_PERMISSION`, `INSUFFICIENT_BALANCE`, `SENDER_NOT_APPROVED`, `TEMPLATE_REJECTED`, `DLT_CONTENT_REJECTED`, `DLT_CONFIGURATION`, `SERVICE_INACTIVE`, and `PROVIDER_RATE_LIMIT` are allowlisted categories inferred from the send response, not raw messages. `NETWORK_OR_TIMEOUT` is an **unknown** outcome because the provider might have accepted the request before the connection failed. No automatic resend, voice fallback or provider switch is attempted.
 
 For support, provide the provider reference, UTC/IST attempt time, sender/template approval status and numeric delivery-report error if available, through the authenticated provider support channel. Ask them to confirm R1 `TRANS_SMS` account activation, DLT entity/header/content/PE-TM mapping and where that reference is logged. Never send an API key or an OTP.
 
@@ -105,7 +144,11 @@ Provider requests are mocked; no paid SMS/call is made. Database-backed tests us
 
 Frontend regression coverage includes customer/admin login, profile, checkout selection/recovery, error sanitization, support references, duplicate-submit prevention, and restoring the real countdown after refresh/backgrounding.
 
-Validation on 2026-09-28: the targeted backend command above passed 85 tests; the six related frontend suites passed 56 tests. The broader `auth.test.js` and `codVerification.test.js` run had 10 existing `SERVICE_UNAVAILABLE` (503) failures; loading the unchanged Git HEAD versions of the affected runtime modules reproduced the same 10 failures. Those separate pre-existing failures were not changed or hidden. Provider requests in regression tests are mocked; these results do not certify a live SMS delivery.
+Regression coverage for the simplified configuration includes byte-for-byte approved Nishaya content, SMS send/resend without optional DLT IDs, rejection of malformed supplied IDs, immediate/later DLT rejection, and secret-safe diagnostics. Local readiness is not a live delivery test. Only the local message template was updated from the latest approval table; no secrets were changed and no SMS was sent.
+
+Simplification validation on 2026-09-28: **91 targeted backend tests passed, 0 failed**. The local read-only `check:otp` reports `ready: true`, `transactional_sms`, and empty missing/invalid lists without DLT IDs. Syntax and whitespace checks passed. Live delivery remains unverified until the corrected message is applied in Render and tested; if it still fails, provider mapping needs confirmation. No production deployment or live SMS test was performed.
+
+Historical baseline from the preceding OTP diagnostics work: six related frontend suites passed 56 tests; broader `auth.test.js` and `codVerification.test.js` had 10 existing `SERVICE_UNAVAILABLE` (503) failures, reproduced against unchanged runtime sources at that time. Those broader/frontend suites were not rerun for this backend-only DLT patch. Targeted mocked tests do not certify live SMS delivery or constitute a full-suite pass.
 
 ## Official references
 
@@ -113,3 +156,4 @@ Validation on 2026-09-28: the targeted backend command above passed 85 tests; th
 - [Legacy manual OTP request](https://2factor.in/API/DOCS/SMS_OTP.html).
 - [Transactional SMS service](https://2factor.in/v3/transactional-sms-services).
 - [Transactional delivery-report endpoint and XML fields](https://dial2verify.com/corp/support-system/tkt/knowledgebase.php?article=15).
+- [2Factor developer portal](https://docs-dev.2factor.in/): describes automatic voice fallback; not evidence of an account-specific no-voice setting.

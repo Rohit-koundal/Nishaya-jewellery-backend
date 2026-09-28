@@ -6,7 +6,7 @@ const { getAdapter } = require('../services/providers/smsProviderRegistry');
 const configurations = {
   twilio: { SMS_ACCOUNT_SID: 'AC-test-account', SMS_AUTH_TOKEN: 'private-test-token', SMS_SENDER_ID: '+15005550006' },
   msg91: { MSG91_AUTH_KEY: 'private-test-key', MSG91_TEMPLATE_ID: 'test-template' },
-  '2factor': { TWOFACTOR_API_KEY: 'private-test-key', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Nishaya verification code: {otp}.' },
+  '2factor': { TWOFACTOR_API_KEY: 'private-test-key', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Nishaya verification code: {otp}.', TWOFACTOR_DLT_ENTITY_ID: '1234567890123456789', TWOFACTOR_DLT_TEMPLATE_ID: '9876543210987654321' },
   fast2sms: { FAST2SMS_API_KEY: 'private-test-key' },
 };
 const accepted = {

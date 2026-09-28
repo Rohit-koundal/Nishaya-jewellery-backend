@@ -35,7 +35,7 @@ function ok(result) { assert.equal(result.status, 200, JSON.stringify(result.dat
 function accessLifetime(token) { const claims = jwt.decode(token); return claims.exp - claims.iat; }
 async function ownerLogin(t) {
   process.env.OTP_MODE = 'production'; process.env.SMS_PROVIDER = '2factor';
-  const configuration = { TWOFACTOR_API_KEY: 'isolated-test-key', TWOFACTOR_DELIVERY_MODE: 'transactional_sms', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}.' };
+  const configuration = { TWOFACTOR_API_KEY: 'isolated-test-key', TWOFACTOR_DELIVERY_MODE: 'transactional_sms', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}.', TWOFACTOR_DLT_ENTITY_ID: '1234567890123456789', TWOFACTOR_DLT_TEMPLATE_ID: '9876543210987654321' };
   const previous = Object.fromEntries(Object.keys(configuration).map(key => [key, process.env[key]]));
   Object.assign(process.env, configuration);
   t.after(() => { for (const key of Object.keys(configuration)) { if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key]; } });

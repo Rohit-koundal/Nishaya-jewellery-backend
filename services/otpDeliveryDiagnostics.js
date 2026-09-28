@@ -15,13 +15,30 @@ function accountFingerprint(key) {
   return key ? crypto.createHash('sha256').update(String(key).trim()).digest('hex').slice(0, 16) : null;
 }
 
+// Preserve useful provider evidence without dumping an untrusted response that
+// can echo an API key, SMS body or OTP. Only known status/error text is retained;
+// unknown/free-form details and extra response fields are deliberately omitted.
+function safeProviderResponse(data, sensitive = []) {
+  const safe = value => !sensitive.some(secret => secret && value.toLowerCase().includes(String(secret).toLowerCase()));
+  const providerStatus = ['Success', 'Error'].includes(data?.Status) && safe(data.Status) ? data.Status : null;
+  const details = typeof data?.Details === 'string' ? data.Details.slice(0, 4096) : '';
+  const match = details.match(/\b(DLT-CNT-REJECT|Invalid API Key(?: - No Account Exists)?|Authentication failed|Unauthorized|Sender (?:id )?not approved|Content template mismatch|PE-TM chain mapping required|Balance too low|Insufficient (?:balance|credits)|Account (?:disabled|inactive|expired)|Too many requests)\b/i);
+  const providerDetails = match && safe(match[0]) ? match[0] : null;
+  return {
+    providerStatus,
+    providerCode: providerDetails?.toUpperCase() === 'DLT-CNT-REJECT' ? 'DLT-CNT-REJECT' : null,
+    providerDetails,
+    providerDetailsRedacted: typeof data?.Details !== 'string' || data.Details !== providerDetails,
+  };
+}
+
 function createDeliveryAttempt({ apiKey, requestId, sensitive = [] }) {
   const startedAt = Date.now();
   const supportReference = crypto.randomUUID();
   const safeRequestId = UUID.test(String(requestId || '')) ? safeProviderReference(requestId, [apiKey, ...sensitive]) : null;
   const base = { supportReference, provider: '2factor', channel: 'sms', deliveryMode: 'transactional_sms', accountFingerprint: accountFingerprint(apiKey) };
   return {
-    finish(status, { reference, reason = null, httpStatus } = {}) {
+    finish(status, { reference, reason = null, httpStatus, providerResponse } = {}) {
       const providerReference = safeProviderReference(reference, [apiKey, ...sensitive]);
       const delivery = {
         ...base, status, providerReference,
@@ -31,6 +48,7 @@ function createDeliveryAttempt({ apiKey, requestId, sensitive = [] }) {
       console.info(JSON.stringify({
         ts: new Date().toISOString(), level: status === 'accepted' ? 'info' : 'warn',
         event: 'otp.delivery', ...delivery, ...(safeRequestId ? { requestId: safeRequestId } : {}),
+        ...(providerResponse !== undefined ? safeProviderResponse(providerResponse, [apiKey, ...sensitive]) : {}),
         ...(Number.isInteger(httpStatus) ? { httpStatus } : {}), durationMs: Date.now() - startedAt,
       }));
       return delivery;
@@ -56,4 +74,4 @@ async function rememberDelivery(record, delivery) {
   }
 }
 
-module.exports = { accountFingerprint, createDeliveryAttempt, publicDelivery, rememberDelivery, safeProviderReference };
+module.exports = { accountFingerprint, createDeliveryAttempt, publicDelivery, rememberDelivery, safeProviderReference, safeProviderResponse };

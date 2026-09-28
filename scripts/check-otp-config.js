@@ -15,7 +15,7 @@ console.log(JSON.stringify({
   ...(configuration.provider === '2factor'
     ? {
       accountFingerprint: accountFingerprint(process.env.TWOFACTOR_API_KEY),
-      note2factor: 'Transactional SMS only. Compare this fingerprint with live otp.delivery logs to detect a different account. Readiness does not check sender/DLT approval. See TWOFACTOR_SMS_DELIVERY.md.',
+      note2factor: 'Transactional SMS only. DLT IDs are optional API overrides, not a local readiness requirement. Ready means configuration is valid, not SMS delivered. DLT-CNT-REJECT still requires 2Factor to resolve the account/content mapping. See TWOFACTOR_SMS_DELIVERY.md.',
     } : {}),
   note: 'Local configuration checks only; credentials, DLT/sender approval and real SMS delivery still need a controlled live test.',
 }, null, 2));

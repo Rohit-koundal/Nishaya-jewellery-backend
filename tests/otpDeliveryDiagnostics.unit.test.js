@@ -10,7 +10,7 @@ const requestId = '01564fe1-0046-434a-8f91-b4c6c8549a3f';
 const apiKey = 'private-diagnostic-unit-key';
 const phone = '9876543210';
 const otp = '654321';
-const valid = { SMS_PROVIDER: '2factor', OTP_MODE: 'production', NODE_ENV: 'production', TWOFACTOR_API_KEY: apiKey, TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Verification code {otp}.' };
+const valid = { SMS_PROVIDER: '2factor', OTP_MODE: 'production', NODE_ENV: 'production', TWOFACTOR_API_KEY: apiKey, TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Verification code {otp}.', TWOFACTOR_DLT_ENTITY_ID: '1234567890123456789', TWOFACTOR_DLT_TEMPLATE_ID: '9876543210987654321' };
 
 test.beforeEach(t => {
   const pattern = /^(SMS_|TWOFACTOR_|OTP_MODE$|NODE_ENV$)/;
@@ -54,6 +54,7 @@ test('sender/template, DLT, balance, inactive service and rate limiting get safe
   for (const [details, reason, httpStatus] of [
     ['Sender id not approved', 'SENDER_NOT_APPROVED', 400],
     ['Content template mismatch', 'TEMPLATE_REJECTED', 400],
+    ['DLT-CNT-REJECT', 'DLT_CONTENT_REJECTED', 200],
     ['PE-TM chain mapping required', 'DLT_CONFIGURATION', 400],
     ['Balance too low', 'INSUFFICIENT_BALANCE', 400],
     ['Account disabled', 'SERVICE_INACTIVE', 400],
@@ -66,7 +67,45 @@ test('sender/template, DLT, balance, inactive service and rate limiting get safe
     assert.equal(result.delivery.status, 'rejected');
     assert.equal(result.delivery.reason, reason);
     assert.equal(fetch.mock.callCount(), 1);
+    const diagnostic = JSON.parse(console.info.mock.calls.at(-1).arguments[0]);
+    assert.equal(diagnostic.providerStatus, 'Error');
+    assert.equal(diagnostic.providerDetails, details);
+    assert.equal(diagnostic.providerDetailsRedacted, true);
     assert.doesNotMatch(JSON.stringify([result, console.info.mock.calls]), /private-diagnostic-unit-key|9876543210|654321/);
+  }
+});
+
+test('DLT rejection evidence is internal, sanitized and never considered accepted, even with HTTP 200', async t => {
+  for (const status of ['Error', 'Success']) {
+    const fetch = t.mock.method(global, 'fetch', async () => new Response(JSON.stringify({
+      Status: status, Details: `DLT-CNT-REJECT: ${apiKey} ${phone} ${otp}`,
+      apikey: apiKey, msg: `Verification code ${otp}`, unexpected: { private: apiKey },
+    })));
+    const result = await sms.sendOtp(phone, otp, { requestId });
+    assert.equal(result.success, false);
+    assert.equal(result.delivery.status, 'rejected');
+    assert.equal(result.delivery.reason, 'DLT_CONTENT_REJECTED');
+    const diagnostic = JSON.parse(console.info.mock.calls.at(-1).arguments[0]);
+    assert.equal(diagnostic.httpStatus, 200);
+    assert.equal(diagnostic.providerStatus, status);
+    assert.equal(diagnostic.providerCode, 'DLT-CNT-REJECT');
+    assert.equal(diagnostic.providerDetails, 'DLT-CNT-REJECT');
+    assert.equal(diagnostic.providerDetailsRedacted, true);
+    assert.equal(publicDelivery(result.delivery).providerCode, undefined);
+    assert.doesNotMatch(JSON.stringify([result, console.info.mock.calls]), /private-diagnostic-unit-key|9876543210|654321|unexpected|Verification code/);
+    assert.equal(fetch.mock.callCount(), 1);
+  }
+});
+
+test('unknown provider text, nested payloads and spoofed status fields are not dumped into logs', async t => {
+  for (const details of [`Unrecognized failure ${apiKey} ${otp}`, { Status: 'Error', Details: apiKey }, null]) {
+    providerReply(t, details, `Error ${apiKey} ${otp}`);
+    await sms.sendOtp(phone, otp, { requestId });
+    const diagnostic = JSON.parse(console.info.mock.calls.at(-1).arguments[0]);
+    assert.equal(diagnostic.providerStatus, null);
+    assert.equal(diagnostic.providerDetails, null);
+    assert.equal(diagnostic.providerDetailsRedacted, true);
+    assert.doesNotMatch(JSON.stringify(console.info.mock.calls), /private-diagnostic-unit-key|654321|Unrecognized failure/);
   }
 });
 
@@ -144,6 +183,15 @@ test('missing, malformed, oversized and entity-containing reports fail closed as
     assert.equal(report.deliveryStatus, 'unknown');
     assert.equal(report.reportAvailable, false);
   }
+});
+
+test('a later DLT-CNT-REJECT receipt is failed with the exact safe provider code, never unknown or delivered', () => {
+  const parsed = parseDeliveryReport(reportXml(receipt('DLT-CNT-REJECT')));
+  assert.equal(parsed.deliveryStatus, 'failed');
+  assert.equal(parsed.reason, 'DLT_CONTENT_REJECTED');
+  assert.equal(parsed.receipts[0].providerCode, 'DLT-CNT-REJECT');
+  assert.doesNotMatch(JSON.stringify(parsed), /9876543210|654321/);
+  assert.equal(parseDeliveryReport(reportXml(receipt(), receipt('DLT-CNT-REJECT'))).deliveryStatus, 'failed');
 });
 
 test('read-only report lookup uses TLS, one bounded GET, no redirects and no SMS endpoint', async t => {
