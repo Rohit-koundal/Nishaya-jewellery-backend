@@ -114,6 +114,7 @@ async function createTargetOtp(target, { purpose = 'login', req, targetType = 'p
   if (!resend.allowed) {
     const error = new Error(`Please wait ${resend.retryAfter}s before requesting another OTP`);
     error.statusCode = 429;
+    error.retryAfter = resend.retryAfter;
     throw error;
   }
 
@@ -212,7 +213,7 @@ async function verifyTargetOtp(target, otp, { targetType = 'phone', req, purpose
   const matches = compareOtp(normalizedTarget, code, record.otpHash);
 
   if (!matches) {
-    if ((record.purpose === 'master_login' || ownerDemo || normalizedContext) && !useMemoryOtpStore()) {
+    if (!useMemoryOtpStore()) {
       await Otp.updateOne({ _id: record._id, isUsed: false, attempts: { $lt: record.maxAttempts } }, { $inc: { attempts: 1 } });
     } else {
       record.attempts += 1;
@@ -223,8 +224,9 @@ async function verifyTargetOtp(target, otp, { targetType = 'phone', req, purpose
     throw error;
   }
 
-  if ((record.purpose === 'master_login' || ownerDemo || normalizedContext) && !useMemoryOtpStore()) {
-    // Atomically redeem scoped and owner OTPs once; parallel requests cannot reuse them.
+  if (!useMemoryOtpStore()) {
+    // Every production OTP is single-use, including customer login. Two parallel
+    // verify requests must not both redeem the same record.
     const redeemed = await Otp.findOneAndUpdate({
       _id: record._id, isUsed: false, purpose: record.purpose, otpHash: record.otpHash,
       ...((record.purpose === 'master_login' || ownerDemo) ? { trustedDelivery: !ownerDemo } : {}),

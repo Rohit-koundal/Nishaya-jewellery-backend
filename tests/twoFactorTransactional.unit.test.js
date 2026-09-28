@@ -8,7 +8,7 @@ const valid = {
   TWOFACTOR_DELIVERY_MODE: 'transactional_sms', TWOFACTOR_API_KEY: 'private-unit-key',
   TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Nishaya verification code: {otp}. Do not share it.',
 };
-const accepted = { Status: 'Success', Details: 'test-sms-reference' };
+const accepted = { Status: 'Success', Details: '09cfe5b29d000018a3acb36000000001' };
 
 test.beforeEach(t => {
   const pattern = /^(SMS_|TWOFACTOR_|OTP_MODE$|NODE_ENV$)/;
@@ -34,7 +34,12 @@ test('transactional mode sends only TRANS_SMS with the exact backend OTP and DLT
   process.env.TWOFACTOR_DLT_TEMPLATE_ID = '9876543210987654321';
   process.env.TWOFACTOR_TEMPLATE_NAME = 'unused-legacy-template';
   const fetch = mockReply(t);
-  assert.deepEqual(await sms.sendOtp('+91 98765 43210', '654321', { requireReal: true }), { success: true, provider: '2factor', channel: 'sms' });
+  const sent = await sms.sendOtp('+91 98765 43210', '654321', { requireReal: true });
+  assert.equal(sent.success, true);
+  assert.equal(sent.provider, '2factor');
+  assert.equal(sent.channel, 'sms');
+  assert.equal(sent.delivery.status, 'accepted');
+  assert.equal(sent.delivery.providerReference, accepted.Details);
   assert.equal(fetch.mock.callCount(), 1);
   const [url, options] = fetch.mock.calls[0].arguments;
   assert.equal(url, 'https://2factor.in/API/R1/');
@@ -113,7 +118,11 @@ test('the pre-request log contains only the fixed route, never secrets, OTP or r
     return { ok: true, status: 200, json: async () => accepted };
   });
   await sms.sendOtp('9876543210', '654321');
-  assert.deepEqual(log.mock.calls.map(call => call.arguments), [['[2Factor] deliveryMode:', 'transactional_sms']]);
+  assert.deepEqual(log.mock.calls[0].arguments, ['[2Factor] deliveryMode:', 'transactional_sms']);
+  const diagnostic = JSON.parse(log.mock.calls[1].arguments[0]);
+  assert.equal(diagnostic.status, 'accepted');
+  assert.equal(diagnostic.providerReference, accepted.Details);
+  assert.doesNotMatch(JSON.stringify(log.mock.calls), /private-unit-key|9876543210|654321/);
   assert.equal(fetch.mock.callCount(), 1);
 });
 
@@ -135,6 +144,8 @@ test('unresolved/multiple placeholders, invalid sender and invalid DLT IDs canno
     ['TWOFACTOR_SMS_TEMPLATE', 'No code here'], ['TWOFACTOR_SMS_TEMPLATE', 'Code {#var#}'],
     ['TWOFACTOR_SMS_TEMPLATE', '{otp} {otp}'], ['TWOFACTOR_SMS_TEMPLATE', '{otp} for {name}'],
     ['TWOFACTOR_SMS_TEMPLATE', '{{otp}}'], ['TWOFACTOR_SMS_SENDER_ID', 'VM-NISHAY'],
+    ['TWOFACTOR_SMS_TEMPLATE', '{otp} for #VAR2#'], ['TWOFACTOR_SMS_SENDER_ID', 'NI'],
+    ['TWOFACTOR_SMS_SENDER_ID', 'NISHAYA'],
     ['TWOFACTOR_DLT_ENTITY_ID', 'not-an-id'], ['TWOFACTOR_DLT_TEMPLATE_ID', 'bad-id'],
   ];
   for (const [field, value] of invalid) {

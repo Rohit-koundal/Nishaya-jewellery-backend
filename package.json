@@ -12,6 +12,7 @@
     "worker:reels": "node workers/reelImport.worker.js",
     "check": "node --check server.js && node --check app.js",
     "check:otp": "node scripts/check-otp-config.js",
+    "check:otp-delivery": "node scripts/check-otp-delivery.js",
     "keys:license": "node scripts/generate-license-keys.js",
     "test": "node --test --test-concurrency=1 \"tests/*.test.js\"",
     "test:payments": "node scripts/test-payment-flow.js"

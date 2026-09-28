@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 const { generateRefreshToken, generateToken } = require('../utils/generateToken');
 const { normalizePhone, normalizeEmail, createOtp, createEmailOtp, verifyOtp: verifyOtpRecord, verifyEmailOtp: verifyEmailOtpRecord } = require('../services/otpService');
 const { sendOtp, isRealSmsProvider } = require('../services/smsService');
+const { publicDelivery } = require('../services/otpDeliveryDiagnostics');
 const { sendOtpEmail } = require('../services/emailService');
 const { getDemoOtp, getJwtRefreshSecret, getJwtSecret, getOtpMode, isDemoOtpMode } = require('../config/env');
 const { ApiError } = require('../utils/apiError');
@@ -121,10 +122,10 @@ exports.sendProfilePhoneChangeOtp = async (req, res) => {
     if (existingUser) return res.status(400).json({ message: 'Mobile number is already in use' });
 
     const { otp, record } = await createOtp(phone, 'profile_phone_change', req);
-    const delivery = await deliverOtpWithFallback(phone, otp, record);
-    return res.json({ success: true, message: 'OTP sent successfully', ...otpResponse(delivery) });
+    const delivery = await deliverOtpWithFallback(phone, otp, record, req);
+    return res.json({ success: true, message: otpDeliveryMessage(delivery), ...otpResponse(delivery, record) });
   } catch (error) {
-    res.status(error.statusCode || 400).json({ success: false, code: error.errorCode, message: error.message });
+    res.status(error.statusCode || 400).json({ success: false, code: error.errorCode, message: error.message, ...publicDelivery(error.delivery) });
   }
 };
 
@@ -211,9 +212,9 @@ exports.sendOtp = async (req, res) => {
       ? (getOwnerDemoProvider(req) ? 'master_demo_login' : 'master_login') : 'login';
     const { otp, record } = await createOtp(phone, purpose, req);
     const delivery = await deliverOtpWithFallback(phone, otp, record, req);
-    res.json({ success: true, message: 'OTP sent successfully', ...otpResponse(delivery) });
+    res.json({ success: true, message: otpDeliveryMessage(delivery), ...otpResponse(delivery, record) });
   } catch (error) {
-    res.status(error.statusCode || 400).json({ success: false, code: error.errorCode, message: error.message });
+    res.status(error.statusCode || 400).json({ success: false, code: error.errorCode, message: error.message, ...publicDelivery(error.delivery), ...(Number.isFinite(error.retryAfter) ? { retryAfter: error.retryAfter } : {}) });
   }
 };
 
@@ -451,17 +452,17 @@ async function deliverOtpWithFallback(phone, otp, record, req) {
     return { success: true, provider: 'demo', demoOtp: getDemoOtp() };
   }
 
-  const delivery = await sendOtp(phone, otp, { requireReal: owner });
+  const delivery = await sendOtp(phone, otp, { requireReal: owner, requestId: req?.requestId, record });
   if (owner) {
     if (!delivery?.success || !isRealSmsProvider(delivery.provider)) {
       if (record) { record.isUsed = true; await record.save(); }
       throw otpDeliveryError(delivery);
     }
     record.trustedDelivery = true; record.provider = delivery.provider; await record.save();
-    return { success: true, owner: true, provider: delivery.provider };
+    return { ...delivery, owner: true };
   }
 
-  if (delivery?.success) return { success: true, provider: delivery.provider };
+  if (delivery?.success) return delivery;
   if (record) { record.isUsed = true; await record.save(); }
   throw otpDeliveryError(delivery);
 }
@@ -473,13 +474,26 @@ function otpDeliveryError(delivery) {
     OTP_DELIVERY_UNAVAILABLE: 'We could not send your OTP. Please try again shortly or contact support if this continues.',
   };
   const code = Object.hasOwn(messages, delivery?.code) ? delivery.code : 'OTP_DELIVERY_UNAVAILABLE';
-  return new ApiError(code, messages[code], { statusCode: 503 });
+  const error = new ApiError(code, messages[code], { statusCode: 503 });
+  error.delivery = delivery?.delivery;
+  return error;
 }
 
-function otpResponse(delivery) {
-  if (delivery?.owner) return { otpMode: 'production' };
-  if (!isDemoOtpMode() || !delivery?.demoOtp) return { otpMode: getOtpMode() };
-  return { otpMode: 'demo', demoOtp: delivery.demoOtp, devOtp: delivery.demoOtp };
+function otpDeliveryMessage(delivery) {
+  return delivery?.delivery?.status === 'accepted' ? 'OTP requested. SMS delivery may take a moment.' : 'OTP sent successfully';
+}
+
+function otpResponse(delivery, record) {
+  const elapsed = Math.max(0, (Date.now() - new Date(record?.createdAt || Date.now()).getTime()) / 1000);
+  const configuredCooldown = Number(process.env.OTP_RESEND_COOLDOWN_SECONDS || 60);
+  const timing = {
+    retryAfter: Math.max(0, Math.ceil((Number.isFinite(configuredCooldown) ? configuredCooldown : 60) - elapsed)),
+    ...(record?.expiresAt ? { expiresAt: record.expiresAt } : {}),
+    ...publicDelivery(delivery?.delivery),
+  };
+  if (delivery?.owner) return { otpMode: 'production', ...timing };
+  if (!isDemoOtpMode() || !delivery?.demoOtp) return { otpMode: getOtpMode(), ...timing };
+  return { otpMode: 'demo', demoOtp: delivery.demoOtp, devOtp: delivery.demoOtp, ...timing };
 }
 
 function allowOtpRequest(phone, ip) {

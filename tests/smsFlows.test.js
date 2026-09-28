@@ -13,11 +13,11 @@ const { MASTER_OWNER_PHONE } = require('../config/masterOwner');
 const providers = {
   twilio: { env: { SMS_ACCOUNT_SID: 'AC-test', SMS_AUTH_TOKEN: 'test-token', SMS_SENDER_ID: '+15005550006' }, reply: { sid: 'SM-test', status: 'queued' } },
   msg91: { env: { MSG91_AUTH_KEY: 'test-key', MSG91_TEMPLATE_ID: 'test-template' }, reply: { type: 'success', message: 'test-request' } },
-  '2factor': { env: { TWOFACTOR_API_KEY: 'test-key', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}. Do not share it.' }, reply: { Status: 'Success', Details: 'test-session' } },
+  '2factor': { env: { TWOFACTOR_API_KEY: 'test-key', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}. Do not share it.' }, reply: { Status: 'Success', Details: '09cfe5b29d000018a3acb36000000001' } },
   '2factor-transactional': {
     provider: '2factor',
     env: { TWOFACTOR_API_KEY: 'test-key', TWOFACTOR_DELIVERY_MODE: 'transactional_sms', TWOFACTOR_SMS_SENDER_ID: 'NISHAY', TWOFACTOR_SMS_TEMPLATE: 'Your verification code is {otp}. Do not share it.' },
-    reply: { Status: 'Success', Details: 'test-sms-reference' },
+    reply: { Status: 'Success', Details: '09cfe5b29d000018a3acb36000000001' },
   },
   fast2sms: { env: { FAST2SMS_API_KEY: 'test-key' }, reply: { return: true, request_id: 'test-request' } },
 };
@@ -91,7 +91,20 @@ for (const name of Object.keys(providers)) {
       assert.equal(verifyOtpHash(phone, delivery.otp, record.otpHash), true);
       assert.equal(record.trustedDelivery, role === 'owner');
       assert.equal(record.provider, providers[name].provider || name);
-      assert.equal((await send('resend-otp')).status, 429);
+      if (record.provider === '2factor') {
+        assert.equal(sent.data.deliveryStatus, 'accepted');
+        assert.equal(sent.data.supportReference, record.delivery.supportReference);
+        assert.equal(record.delivery.providerReference, providers[name].reply.Details);
+        assert.equal(sent.data.providerReference, undefined);
+        assert.equal(sent.data.accountFingerprint, undefined);
+        assert.match(sent.data.message, /requested/i);
+        assert.equal(failed.data.deliveryStatus, 'rejected');
+        assert.match(failed.data.supportReference, /^[a-f0-9-]{36}$/);
+      }
+      assert.ok(sent.data.retryAfter > 0 && sent.data.retryAfter <= 60);
+      const cooldown = await send('resend-otp');
+      assert.equal(cooldown.status, 429);
+      assert.ok(cooldown.data.retryAfter > 0);
       assert.equal((await verify('000000')).status, 400);
       assert.equal((await Otp.findById(record._id)).attempts, 1);
 
@@ -186,4 +199,14 @@ test('client handover recognizes all configured providers and still requires loc
   process.env.OTP_MODE = 'production';
   await Configuration.create({ _id: 'store', locked: false });
   await assert.rejects(assertClientHandoverReady(), /Lock the configuration/);
+});
+
+test('parallel customer OTP verification succeeds only once', async t => {
+  const delivery = mockDelivery(t, '2factor');
+  delivery.accepted = true;
+  const phone = '9876543210';
+  assert.equal((await request('/api/auth/send-otp', { method: 'POST', body: { phone } })).status, 200);
+  const results = await Promise.all([1, 2].map(() => request('/api/auth/verify-otp', { method: 'POST', body: { phone, otp: delivery.otp } })));
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 400]);
+  assert.equal(delivery.count, 1);
 });

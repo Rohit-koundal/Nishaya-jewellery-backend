@@ -2,6 +2,7 @@ const Order = require('../models/Order');
 const Shipment = require('../models/Shipment');
 const { createTargetOtp, verifyTargetOtp, invalidateOtp, getExpiryMinutes } = require('./otpService');
 const { sendOtp } = require('./smsService');
+const { publicDelivery } = require('./otpDeliveryDiagnostics');
 const { getDemoOtp, getOtpMode, isDemoOtpMode } = require('../config/env');
 const { ApiError } = require('../utils/apiError');
 
@@ -84,16 +85,16 @@ async function sendOrderOtp({ order, phone, req }) {
   const created = await createTargetOtp(phone, { purpose: 'order_cod_verification', contextId, req, targetType: 'phone' });
   let delivery;
   if (isDemoOtpMode()) delivery = { success: true, provider: 'demo', demoOtp: getDemoOtp() };
-  else delivery = await sendOtp(created.phone, created.otp);
+  else delivery = await sendOtp(created.phone, created.otp, { requestId: req?.requestId, record: created.record });
   if (!delivery?.success) {
     await invalidateOtp(created.record);
     await Order.updateOne({ _id: order._id, 'codVerification.status': 'PENDING' }, { $set: { 'codVerification.deliveryStatus': 'FAILED', 'codVerification.lastDeliveryError': delivery?.code || 'OTP_DELIVERY_UNAVAILABLE' } });
-    throw new ApiError(delivery?.code || 'OTP_DELIVERY_UNAVAILABLE', 'We could not send the verification code. Please try again shortly.', { statusCode: 503 });
+    throw new ApiError(delivery?.code || 'OTP_DELIVERY_UNAVAILABLE', 'We could not send the verification code. Please try again shortly.', { statusCode: 503, details: publicDelivery(delivery?.delivery) });
   }
   const sentAt = new Date();
   const expiresAt = new Date(sentAt.getTime() + getExpiryMinutes() * 60000);
   await Order.updateOne({ _id: order._id, 'codVerification.status': 'PENDING' }, { $set: { 'codVerification.sentAt': sentAt, 'codVerification.expiresAt': expiresAt, 'codVerification.deliveryStatus': 'SENT', 'codVerification.lastDeliveryError': '' }, $inc: { 'codVerification.sendCount': 1 } });
-  return { required: true, status: 'PENDING', sentAt, expiresAt, retryAfter: Number(process.env.OTP_RESEND_COOLDOWN_SECONDS || 60), otpMode: getOtpMode(), ...(delivery.demoOtp ? { demoOtp: delivery.demoOtp } : {}) };
+  return { required: true, status: 'PENDING', sentAt, expiresAt, retryAfter: Number(process.env.OTP_RESEND_COOLDOWN_SECONDS || 60), otpMode: getOtpMode(), ...publicDelivery(delivery.delivery), ...(delivery.demoOtp ? { demoOtp: delivery.demoOtp } : {}) };
 }
 
 async function verifyOrderOtp({ order, phone, otp, tenantFilter = {} }) {

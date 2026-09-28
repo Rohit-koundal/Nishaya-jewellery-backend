@@ -291,7 +291,12 @@ exports.createOrder = asyncHandler(async (req, res) => {
   let verificationDelivery = null;
   if (order.codVerification?.required && order.codVerification.status === 'PENDING') {
     try { verificationDelivery = await sendOrderOtp({ order, phone: req.user.phone, req }); }
-    catch (deliveryError) { verificationDelivery = { required: true, status: 'PENDING', deliveryStatus: 'FAILED', message: deliveryError.message }; }
+    catch (deliveryError) {
+      verificationDelivery = {
+        required: true, status: 'PENDING', deliveryStatus: 'FAILED', message: deliveryError.message,
+        ...(deliveryError.details?.supportReference ? { supportReference: deliveryError.details.supportReference } : {}),
+      };
+    }
   }
   const response = publicCustomerOrder(order);
   if (verificationDelivery) response.codVerificationDelivery = verificationDelivery;

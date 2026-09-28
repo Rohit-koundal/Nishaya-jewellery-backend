@@ -1,4 +1,5 @@
 const { readConfiguration, requireConfiguration, providerError, otpRecipient, requestJson } = require('./smsProviderUtils');
+const { createDeliveryAttempt } = require('../otpDeliveryDiagnostics');
 
 function getConfiguration() {
   // This adapter has one transport only. A legacy/unknown explicit mode must
@@ -13,8 +14,8 @@ function getConfiguration() {
   // the application's single {otp} placeholder is substituted at send time.
   configuration.values.message = String(process.env.TWOFACTOR_SMS_TEMPLATE || '');
   const { sender, message, entityId, templateId } = configuration.values;
-  if (sender && !/^[a-z]{6}$/i.test(sender)) invalid.push('TWOFACTOR_SMS_SENDER_ID');
-  if (message.trim() && ((message.match(/\{otp\}/g) || []).length !== 1 || /[{}]/.test(message.replace('{otp}', '')))) {
+  if (sender && !/^[a-z]{3,6}$/i.test(sender)) invalid.push('TWOFACTOR_SMS_SENDER_ID');
+  if (message.trim() && ((message.match(/\{otp\}/g) || []).length !== 1 || /[{}]/.test(message.replace('{otp}', '')) || /#VAR\d+#/i.test(message))) {
     invalid.push('TWOFACTOR_SMS_TEMPLATE');
   }
   if (entityId && !/^\d{1,64}$/.test(entityId)) invalid.push('TWOFACTOR_DLT_ENTITY_ID');
@@ -22,10 +23,11 @@ function getConfiguration() {
   return { ...configuration, invalid, deliveryMode: mode === 'transactional_sms' ? mode : 'invalid' };
 }
 
-async function sendOtp(phone, otp) {
+async function sendOtp(phone, otp, { requestId } = {}) {
   const configuration = getConfiguration();
   const { apiKey, sender, message, entityId, templateId } = requireConfiguration(configuration);
   const recipient = otpRecipient(phone, otp, { indiaOnly: true });
+  const attempt = createDeliveryAttempt({ apiKey, requestId, sensitive: [String(otp), recipient, recipient.slice(1), recipient.slice(-10)] });
   // Dedicated transactional SMS only; never fall back to the OTP/voice product.
   // https://documenter.getpostman.com/view/301893/TWDamFGh (Send Single SMS)
   const body = new URLSearchParams({
@@ -36,15 +38,38 @@ async function sendOtp(phone, otp) {
   if (templateId) body.set('ctid', templateId);
   // Safe route diagnostic only: never log the key, recipient, OTP or request body.
   console.info('[2Factor] deliveryMode:', configuration.deliveryMode);
-  const { response, data } = await requestJson('https://2factor.in/API/R1/', {
-    method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
-  });
+  let result;
+  try {
+    result = await requestJson('https://2factor.in/API/R1/', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
+    });
+  } catch (error) {
+    error.delivery = attempt.finish('unknown', { reason: 'NETWORK_OR_TIMEOUT' });
+    throw error;
+  }
+  const { response, data } = result;
   if (!response.ok || data?.Status !== 'Success' || typeof data?.Details !== 'string' || !data.Details.trim()) {
     const authFailed = response.status === 401 || response.status === 403 || /invalid api key|authentication failed|unauthori[sz]ed/i.test(String(data?.Details || ''));
-    throw providerError(authFailed ? 'OTP_PROVIDER_AUTH_FAILED' : 'OTP_DELIVERY_UNAVAILABLE');
+    const error = providerError(authFailed ? 'OTP_PROVIDER_AUTH_FAILED' : 'OTP_DELIVERY_UNAVAILABLE');
+    const reason = failureReason(data?.Details, response.status, authFailed);
+    error.delivery = attempt.finish(data?.Status === 'Error' || (response.status >= 400 && response.status < 500) ? 'rejected' : 'unknown', { reason, httpStatus: response.status });
+    throw error;
   }
+  const delivery = attempt.finish('accepted', { reference: data.Details, httpStatus: response.status });
   // Provider acceptance of the requested channel is not a handset delivery receipt.
-  return { success: true, provider: '2factor', channel: 'sms' };
+  return { success: true, provider: '2factor', channel: 'sms', delivery };
+}
+
+function failureReason(details, status, authFailed) {
+  if (authFailed) return 'AUTH_OR_PERMISSION';
+  if (status === 429) return 'PROVIDER_RATE_LIMIT';
+  const text = typeof details === 'string' ? details.slice(0, 4096).toLowerCase() : '';
+  if (/balance|credit|insufficient/.test(text)) return 'INSUFFICIENT_BALANCE';
+  if (/sender|header/.test(text)) return 'SENDER_NOT_APPROVED';
+  if (/template|content.*mismatch/.test(text)) return 'TEMPLATE_REJECTED';
+  if (/dlt|entity|peid|ctid|mapping|chain/.test(text)) return 'DLT_CONFIGURATION';
+  if (/inactive|disabled|expired/.test(text)) return 'SERVICE_INACTIVE';
+  return status >= 500 ? 'PROVIDER_UNAVAILABLE' : 'PROVIDER_REJECTED_OR_INVALID_RESPONSE';
 }
 
 module.exports = { sendOtp, getConfiguration };
