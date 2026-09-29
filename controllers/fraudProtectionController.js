@@ -55,7 +55,7 @@ exports.uploadEvidence = asyncHandler(async (req, res) => {
       if (isR2Configured()) result = await uploadFileToR2(file, { folder: 'verification' });
       else if (isCloudinaryConfigured()) result = video ? await uploadVideo(file, { folder: 'verification' }) : await uploadImage(file, { folder: 'verification' });
       else result = { url: `/uploads/${path.basename(file.filename)}`, publicId: path.basename(file.filename), provider: 'local' };
-      return { fileUrl: result.url, publicId: result.publicId, provider: result.provider || (isR2Configured() ? 'r2' : isCloudinaryConfigured() ? 'cloudinary' : 'local'), mimeType: file.mimetype, sizeBytes: file.size, kind: video ? 'VIDEO' : 'IMAGE' };
+      return { fileUrl: result.url, publicId: result.publicId, provider: result.provider || (isR2Configured() ? 'r2' : isCloudinaryConfigured() ? 'cloudinary' : 'local'), mimeType: result.mimeType || file.mimetype, sizeBytes: result.sizeBytes ?? file.size, kind: video ? 'VIDEO' : 'IMAGE' };
     }));
     if (isR2Configured() || isCloudinaryConfigured()) await cleanup(req.files);
     res.status(201).json({ files: saved });

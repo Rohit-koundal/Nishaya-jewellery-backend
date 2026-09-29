@@ -2,6 +2,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const { pipeline } = require('stream/promises');
+const { optimizeImageBuffer } = require('./imageOptimization');
 const {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -50,11 +51,11 @@ async function uploadOriginalVideo(file) {
   };
 }
 
-async function uploadGeneratedImage(file) {
+async function uploadGeneratedImage(file, options = {}) {
   const provider = assertStorageConfigured();
   const uploaded = provider === 'r2'
-    ? await uploadFileToR2(file, { folder: 'reel-imports/candidates' })
-    : await uploadImage(file, { folder: 'reel-imports/candidates' });
+    ? await uploadFileToR2(file, { folder: 'reel-imports/candidates', ...options })
+    : await uploadImage(file, { folder: 'reel-imports/candidates', ...options });
   return { provider, storageKey: uploaded.publicId, url: uploaded.url };
 }
 
@@ -206,6 +207,13 @@ async function createSignedReadUrl({ provider, storageKey, url }) {
 }
 
 async function putBufferToR2(buffer, storageKey, contentType = 'application/octet-stream') {
+  if (contentType.startsWith('image/')) {
+    // Social publishing requires JPEG. Preserve that format while enforcing
+    // the same byte/dimension budget; catalog images default to WebP.
+    const image = await optimizeImageBuffer(buffer, { format: contentType === 'image/jpeg' ? 'jpeg' : 'webp' });
+    buffer = image.buffer; contentType = image.mimeType;
+    storageKey = `${storageKey.replace(/\.[^/.]+$/, '')}.${image.extension}`;
+  }
   await getR2Client().send(new PutObjectCommand({
     Bucket: process.env.R2_BUCKET_NAME,
     Key: storageKey,

@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const fs = require('fs/promises');
+const { optimizeImageFile } = require('./imageOptimization');
 
 function isCloudinaryConfigured() {
   return Boolean(process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET);
@@ -24,9 +25,10 @@ async function uploadFile(file, resourceType = 'image', options = {}) {
     .update(`folder=${folder}&timestamp=${timestamp}${apiSecret}`)
     .digest('hex');
 
-  const buffer = await fs.readFile(file.path);
+  const image = resourceType === 'image' ? await optimizeImageFile(file, { format: options.imageFormat || 'webp' }) : null;
+  const buffer = image?.buffer || await fs.readFile(file.path);
   const form = new FormData();
-  form.append('file', new Blob([buffer], { type: file.mimetype }), file.originalname);
+  form.append('file', new Blob([buffer], { type: image?.mimeType || file.mimetype }), image ? `${String(file.originalname || 'image').replace(/\.[^.]+$/, '')}.${image.extension}` : file.originalname);
   form.append('api_key', apiKey);
   form.append('timestamp', String(timestamp));
   form.append('folder', folder);
@@ -43,6 +45,7 @@ async function uploadFile(file, resourceType = 'image', options = {}) {
     url: data.secure_url,
     publicId: data.public_id,
     originalName: file.originalname,
+    ...(image ? { mimeType: image.mimeType, sizeBytes: image.sizeBytes, width: image.width, height: image.height } : {}),
   };
 }
 

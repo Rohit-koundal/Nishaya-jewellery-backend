@@ -1,8 +1,7 @@
 const crypto = require('crypto');
-const fs = require('fs/promises');
 const fsSync = require('fs');
-const path = require('path');
 const { DeleteObjectCommand, S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { optimizeImageFile } = require('./imageOptimization');
 
 let r2Client;
 
@@ -10,6 +9,7 @@ const allowedFolders = new Set([
   'products',
   'categories',
   'banners',
+  'website-branding',
   'product-videos',
   'reel-imports/original',
   'reel-imports/normalized',
@@ -72,14 +72,14 @@ function buildObjectKey(file, { folder = 'products', extension = 'webp' } = {}) 
 }
 
 async function uploadImageToR2(file, options = {}) {
-  const objectKey = buildObjectKey(file, { ...options, extension: 'webp' });
-  const buffer = await fs.readFile(file.path);
+  const image = await optimizeImageFile(file, { format: options.imageFormat || 'webp' });
+  const objectKey = buildObjectKey(file, { ...options, extension: image.extension });
 
   await getR2Client().send(new PutObjectCommand({
     Bucket: process.env.R2_BUCKET_NAME,
     Key: objectKey,
-    Body: buffer,
-    ContentType: file.mimetype || 'image/webp',
+    Body: image.buffer,
+    ContentType: image.mimeType,
     CacheControl: 'public, max-age=31536000, immutable',
   }));
 
@@ -87,12 +87,16 @@ async function uploadImageToR2(file, options = {}) {
     url: buildPublicUrl(objectKey),
     publicId: objectKey,
     originalName: file.originalname,
-    mimeType: file.mimetype,
-    sizeBytes: file.size,
+    mimeType: image.mimeType,
+    sizeBytes: image.sizeBytes,
+    width: image.width, height: image.height,
   };
 }
 
 async function uploadFileToR2(file, options = {}) {
+  // Mixed evidence and generated reel frames previously bypassed image handling
+  // and were even assigned .mp4 keys. Videos keep their existing streaming path.
+  if (String(file.mimetype || '').toLowerCase().startsWith('image/') || /\.(?:jpe?g|png|webp)$/i.test(file.originalname || '')) return uploadImageToR2(file, options);
   const extension = resolveFileExtension(file);
   const objectKey = buildObjectKey(file, { ...options, extension });
   const stream = fsSync.createReadStream(file.path);

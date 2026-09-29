@@ -82,7 +82,7 @@ async function persist(file, video) {
   if (!video && storage.getStorageProvider() === 'r2') {
     return (await storage.putBufferToR2(await fs.readFile(file), `social-studio/${crypto.randomUUID()}.jpg`, 'image/jpeg')).url;
   }
-  if (storage.getStorageProvider()) return (await (video ? storage.uploadOriginalVideo : storage.uploadGeneratedImage)({ path: file, mimetype: video ? 'video/mp4' : 'image/jpeg', originalname: path.basename(file) })).url;
+  if (storage.getStorageProvider()) return (await (video ? storage.uploadOriginalVideo : storage.uploadGeneratedImage)({ path: file, mimetype: video ? 'video/mp4' : 'image/jpeg', originalname: path.basename(file) }, video ? {} : { imageFormat: 'jpeg' })).url;
   await fs.mkdir(uploads, { recursive: true });
   const name = `social-${crypto.randomUUID()}${video ? '.mp4' : '.jpg'}`; await fs.copyFile(file, path.join(uploads, name));
   return `${String(process.env.PUBLIC_API_URL || 'http://localhost:5000').replace(/\/$/, '')}/uploads/${name}`;
