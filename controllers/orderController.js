@@ -66,6 +66,9 @@ function publicCustomerOrder(order) {
   const value = order?.toObject ? order.toObject() : { ...(order || {}) };
   delete value.packageVerification;
   delete value.fraudProtectionSnapshot;
+  delete value.orderNotificationVersion;
+  delete value.orderNotificationQueuedAt;
+  delete value.whatsappNotificationConsent;
   if (value.codVerification) value.codVerification = publicVerification(value.codVerification);
   if (value.deliveryProof) delete value.deliveryProof.deliveryOtpVerified;
   if (value.shipment && typeof value.shipment === 'object' && value.shipment.provider) value.shipment = require('../services/deliveryService').customerShipment(value.shipment);
@@ -200,6 +203,7 @@ exports.createOrder = asyncHandler(async (req, res) => {
         shippingAddress,
         billingAddress: req.body?.billingAddress,
         extra: {
+          whatsappNotificationConsent: require('../services/orderNotificationWhatsapp').orderWhatsappConsent(req.user, req.body?.whatsappOrderUpdates),
           storeId: draft.storeId || undefined,
           checkoutAttemptId: attemptId,
           checkoutFingerprint: fingerprint,
@@ -265,6 +269,7 @@ exports.createOrder = asyncHandler(async (req, res) => {
   }
 
   await consumePurchasedCart(order).catch(() => null);
+  require('../services/orderNotificationService').queueOrderNotificationsLater(order._id);
   if (replayed) return res.status(200).json(publicCustomerOrder(order));
 
   logAudit({ req, action: 'ORDER_CREATE', entityType: 'Order', entityId: order._id, storeId: order.storeId, after: { orderStatus: order.orderStatus, paymentStatus: order.paymentStatus, paymentMethod: order.paymentMethod, finalAmount: order.finalAmount } });

@@ -1,6 +1,8 @@
 const { ApiError } = require('../utils/apiError');
 
 const TEXT_LIMITS = {
+  orderNotificationEmail: 254,
+  orderNotificationWhatsapp: 24,
   storeName: 100, legalBusinessName: 160, tagline: 180, seoTitle: 100, seoDescription: 300,
   contactEmail: 254, contactPhone: 24, whatsappNumber: 24, address: 1000, billingAddress: 1000,
   gstin: 15, invoicePrefix: 16, invoiceNote: 500, supportHours: 200, footerText: 1000,
@@ -11,7 +13,7 @@ const TEXT_LIMITS = {
 const NUMBERS = ['deliveryCharge', 'freeShippingMinAmount', 'codCharge', 'codMaxAmount', 'codMinAmount',
   'returnWindowDays', 'prepaidDiscountValue', 'codRtoRestrictionLimit', 'rtoBlockMinOrders', 'rtoBlockThreshold', 'platformFee', 'gstRate', 'minimumOrderAmount',
   'customerReturnShippingCharge', 'customerRestockingFeePercent', 'exchangeReservationHours', 'returnSlaHours', 'rtoRefundDeduction', 'returnWeightToleranceGrams', 'highValueVerificationThreshold'];
-const BOOLEANS = ['brandIdentityEnabled', 'contactDetailsEnabled', 'announcementEnabled', 'acceptingOrders', 'razorpayEnabled', 'upiEnabled',
+const BOOLEANS = ['orderAdminWhatsappEnabled', 'orderCustomerWhatsappEnabled', 'orderAdminEmailEnabled', 'orderCustomerEmailEnabled', 'brandIdentityEnabled', 'contactDetailsEnabled', 'announcementEnabled', 'acceptingOrders', 'razorpayEnabled', 'upiEnabled',
   'cardPaymentEnabled', 'netBankingEnabled', 'walletEnabled', 'codEnabled', 'codConfirmationRequired', 'smartCodVerificationEnabled', 'rtoBlockEnabled', 'searchIndexingEnabled',
   'returnsEnabled', 'refundDeliveryChargeOnFullReturn', 'refundPlatformFeeOnFullReturn', 'refundCodChargeOnFullReturn',
   'requireProductQrScan', 'requirePackingPhotos', 'requirePackingVideo', 'requireDispatchWeight', 'requireSecuritySeal', 'requireReturnPhotos', 'requireReturnVideo', 'enableSecurityTag', 'enableCustomerRiskDetection', 'autoApproveVerifiedReturns'];
@@ -35,6 +37,10 @@ function normalizeSettingsUpdates(input, current = {}) {
   }
   if (!String(updates.storeName ?? current.storeName ?? '').trim()) invalid('Store name is required.');
   if (updates.contactEmail && !/^\S+@\S+\.\S+$/.test(updates.contactEmail)) invalid('Enter a valid contact email.');
+  if (updates.orderNotificationEmail && !/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(updates.orderNotificationEmail)) invalid('Enter a valid order notification email.');
+  if (updates.orderNotificationWhatsapp && !require('./orderNotificationWhatsapp').whatsappNumber(updates.orderNotificationWhatsapp)) invalid('Enter a valid admin WhatsApp number with country code.');
+  if ((updates.orderAdminWhatsappEnabled ?? current.orderAdminWhatsappEnabled) === true
+      && !require('./orderNotificationWhatsapp').whatsappNumber(updates.orderNotificationWhatsapp ?? current.orderNotificationWhatsapp ?? '')) invalid('Add an admin WhatsApp number before enabling alerts.');
   for (const key of ['contactPhone', 'whatsappNumber']) {
     if (updates[key] && (!/^[+\d ()-]+$/.test(updates[key]) || !/^\d{10,15}$/.test(updates[key].replace(/\D/g, '')))) invalid(`${key} must contain 10 to 15 digits.`);
   }

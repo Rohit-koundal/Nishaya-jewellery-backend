@@ -77,7 +77,7 @@ function testCouponDiscountRules() {
   console.log('\u2713 Coupon discount calculation');
 }
 
-function testPaymentSettingRules() {
+async function testPaymentSettingRules() {
   const { assertPaymentMethodAllowed, resolveCodCharge, resolveDeliveryCharge } = require('../services/paymentSettingsService');
 
   assert.strictEqual(resolveCodCharge('COD', { codCharge: 49 }), 49);
@@ -85,39 +85,37 @@ function testPaymentSettingRules() {
   assert.strictEqual(resolveDeliveryCharge(1500, { deliveryCharge: 99, freeShippingMinAmount: 999 }), 0);
   assert.strictEqual(resolveDeliveryCharge(500, { deliveryCharge: 99, freeShippingMinAmount: 999 }), 99);
 
-  assert.throws(
+  await assert.rejects(
     () => assertPaymentMethodAllowed('COD', { codEnabled: false }, { razorpayConfigured: true }),
     /Cash on Delivery is currently unavailable/,
   );
-  assert.throws(
+  await assert.rejects(
     () => assertPaymentMethodAllowed('COD', { codEnabled: true, codMaxAmount: 1000 }, { razorpayConfigured: true, orderAmount: 2000 }),
     /up to Rs. 1000/,
   );
-  assert.throws(
+  await assert.rejects(
     () => assertPaymentMethodAllowed('UPI', { razorpayEnabled: true }, { razorpayConfigured: false }),
     /Online payment is not available/,
   );
-  assert.throws(
+  await assert.rejects(
     () => assertPaymentMethodAllowed('CRYPTO', { codEnabled: true }, { razorpayConfigured: true }),
     /valid payment method/,
   );
 
-  assertPaymentMethodAllowed('UPI', { razorpayEnabled: true, upiEnabled: true }, { razorpayConfigured: true });
-  assertPaymentMethodAllowed('COD', { codEnabled: true, codMaxAmount: 5000 }, { razorpayConfigured: false, orderAmount: 2000 });
+  await assertPaymentMethodAllowed('UPI', { razorpayEnabled: true, upiEnabled: true }, { razorpayConfigured: true });
+  await assertPaymentMethodAllowed('COD', { codEnabled: true, codMaxAmount: 5000 }, { razorpayConfigured: false, orderAmount: 2000 });
   console.log('\u2713 Payment method and charge rules');
 }
 
-function run() {
+async function run() {
   testSignatureVerification();
   testPickOrderFields();
   testCouponDiscountRules();
-  testPaymentSettingRules();
+  await testPaymentSettingRules();
   console.log('\nAll payment helper tests passed. Run "npm test" for the full database-backed suite.');
 }
 
-try {
-  run();
-} catch (error) {
+run().catch(error => {
   console.error('\nPayment flow test failed:', error.message);
   process.exit(1);
-}
+});

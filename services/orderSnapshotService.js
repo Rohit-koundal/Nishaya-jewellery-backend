@@ -56,6 +56,7 @@ function buildPersistedOrderFields({ userId, draft, shippingAddress, billingAddr
   const shipping = snapshotAddress(shippingAddress);
   return {
     _id: id,
+    orderNotificationVersion: 2,
     user: userId,
     orderItems: snapshotOrderItems(draft.items),
     shippingAddress: shipping,

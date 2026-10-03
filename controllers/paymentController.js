@@ -171,6 +171,7 @@ async function finalizePaidOrder(orderId, { razorpayPaymentId, note, req, source
       return { ...result, order: refunded || result.order };
     }
     if (result.order?.paymentStatus === 'Paid') await consumePurchasedCart(result.order).catch(() => null);
+    if (result.order?.paymentStatus === 'Paid') require('../services/orderNotificationService').queueOrderNotificationsLater(result.order._id);
     if (result.order && !result.alreadyPaid) notifyPaid(result.order);
     if (result.order && !result.alreadyPaid) logAudit({ req, source, action: 'PAYMENT_CAPTURED', entityType: 'Order', entityId: result.order._id, storeId: result.order.storeId, after: { paymentStatus: result.order.paymentStatus, orderStatus: result.order.orderStatus, finalAmount: result.order.finalAmount } });
     return result;
@@ -223,7 +224,7 @@ async function createPaymentOrder(req, res) {
 
   const amountInPaise = amountToPaise(draft.totals.finalAmount);
   require('../services/shippingRules').assertQuotedTotal(draft, req.body?.expectedTotal);
-  if (amountInPaise < 100) {
+  if (!Number.isSafeInteger(amountInPaise) || amountInPaise < 100) {
     throw new ApiError('VALIDATION_ERROR', 'Order amount must be at least Rs. 1 for online payment.');
   }
 
@@ -259,6 +260,7 @@ async function createPaymentOrder(req, res) {
         shippingAddress,
         billingAddress: req.body?.billingAddress,
         extra: {
+          whatsappNotificationConsent: require('../services/orderNotificationWhatsapp').orderWhatsappConsent(req.user, req.body?.whatsappOrderUpdates),
           storeId: draft.storeId || undefined,
           checkoutAttemptId: attemptId,
           checkoutFingerprint: fingerprint,
@@ -359,23 +361,24 @@ async function createPaymentOrder(req, res) {
 async function verifyPayment(req, res) {
   assertCheckoutReady(req);
 
-  const razorpayOrderId = req.body.razorpay_order_id || req.body.order_id;
-  const razorpayPaymentId = req.body.razorpay_payment_id || req.body.payment_id;
-  const razorpaySignature = req.body.razorpay_signature || req.body.signature;
+  const razorpayOrderId = req.body?.razorpay_order_id || req.body?.order_id;
+  const razorpayPaymentId = req.body?.razorpay_payment_id || req.body?.payment_id;
+  const razorpaySignature = req.body?.razorpay_signature || req.body?.signature;
 
-  if (!razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
-    throw new ApiError('VALIDATION_ERROR', 'Missing payment verification fields');
+  if ([razorpayOrderId, razorpayPaymentId, razorpaySignature].some(value => typeof value !== 'string' || !value.trim() || value.length > 200)) {
+    throw new ApiError('VALIDATION_ERROR', 'Missing or invalid payment verification fields');
   }
 
   const secret = process.env.RAZORPAY_KEY_SECRET;
   if (!secret) throw new ApiError('SERVICE_UNAVAILABLE', 'Razorpay is not configured');
 
-  if (!verifyRazorpaySignature({ razorpayOrderId, razorpayPaymentId, razorpaySignature, secret })) {
-    throw new ApiError('PAYMENT_FAILED', 'Payment verification failed');
-  }
-
   const pending = await Order.findOne({ razorpayOrderId, user: req.user._id });
   if (!pending) throw notFound('We could not find a pending order for this payment. Please contact support.');
+
+  // Sign the provider order ID saved by our server, never an unbound client ID.
+  if (!verifyRazorpaySignature({ razorpayOrderId: pending.razorpayOrderId, razorpayPaymentId, razorpaySignature, secret })) {
+    throw new ApiError('PAYMENT_FAILED', 'Payment verification failed');
+  }
 
   const { order, alreadyPaid } = await finalizePaidOrder(pending._id, {
     razorpayPaymentId,

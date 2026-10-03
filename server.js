@@ -95,6 +95,7 @@ async function startServer() {
     cleanupTasks.push(require('./services/deliveryService').startDeliveryWorker());
     cleanupTasks.push(require('./services/refundReconciliationService').startRefundReconciliationWorker());
     cleanupTasks.push(require('./services/reportScheduleService').startReportScheduleWorker());
+    cleanupTasks.push(require('./services/orderNotificationService').startOrderNotificationWorker());
     cleanupTasks.push(require('./services/storeContentService').startContentReleaseWorker());
     cleanupTasks.push(require('./services/subscriptionLifecycleService').startSubscriptionLifecycleWorker());
     const paymentController = require('./controllers/paymentController');

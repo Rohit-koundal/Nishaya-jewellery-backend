@@ -64,7 +64,7 @@ async function sendViaBrevo(email, otp) {
   };
 }
 
-async function sendTransactionalEmail({ to, subject, htmlContent, attachments = [] }) {
+async function sendTransactionalEmail({ to, subject, htmlContent, textContent, idempotencyKey, attachments = [] }) {
   const apiKey = process.env.BREVO_API_KEY;
   const senderEmail = process.env.BREVO_SENDER_EMAIL;
   if (!apiKey || !senderEmail) {
@@ -74,17 +74,21 @@ async function sendTransactionalEmail({ to, subject, htmlContent, attachments = 
   }
   const response = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
+    ...(idempotencyKey ? { signal: AbortSignal.timeout(12000) } : {}),
     headers: { accept: 'application/json', 'api-key': apiKey, 'content-type': 'application/json' },
     body: JSON.stringify({
       sender: { email: senderEmail, name: process.env.BREVO_SENDER_NAME || 'Nishaya Jewellery' },
       to: [{ email: to }], subject, htmlContent,
+      ...(textContent ? { textContent } : {}),
+      ...(idempotencyKey ? { headers: { idempotencyKey } } : {}),
       attachment: attachments.map((item) => ({ name: item.name, content: Buffer.from(item.content).toString('base64') })),
     }),
   });
   if (!response.ok) {
     const details = await safeJson(response);
-    const error = new Error(details?.message || 'Unable to send scheduled report');
+    const error = new Error(idempotencyKey ? 'Transactional email provider rejected the request' : details?.message || 'Unable to send scheduled report');
     error.statusCode = response.status || 500;
+    error.providerCode = details?.code;
     throw error;
   }
   return response.json();

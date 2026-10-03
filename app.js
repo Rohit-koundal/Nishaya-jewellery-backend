@@ -33,6 +33,9 @@ app.post(
 );
 
 // Meta verifies the exact raw bytes. Keep these routes before JSON parsing.
+const whatsappNotifications = require('./controllers/whatsappNotificationWebhook');
+app.get('/api/notifications/whatsapp/webhook', whatsappNotifications.verify);
+app.post('/api/notifications/whatsapp/webhook', express.raw({ type: '*/*', limit: '1mb' }), whatsappNotifications.receive);
 const socialOAuth = require('./modules/social-workspace/oauth');
 const socialInbox = require('./modules/social-workspace/inbox');
 app.get('/api/social/webhook', socialInbox.verifyWebhook);

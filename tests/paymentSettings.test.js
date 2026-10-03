@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+require('./catalogTestSetup');
 
 const { request, resetDatabase, startTestEnvironment, stopTestEnvironment } = require('./helpers');
 const { createAdmin, createCustomer, createProduct, setSettings, validAddress } = require('./factories');

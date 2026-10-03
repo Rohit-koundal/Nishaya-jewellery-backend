@@ -5,7 +5,7 @@ const mongoose = require('mongoose');
 
 const ADMIN_EVENTS = {
   ORDER_PLACED: ['New order received', 'A new order is ready to review.'],
-  ORDER_CONFIRMED: ['Online order confirmed', 'Payment was confirmed for a new order.'],
+  ORDER_CONFIRMED: ['Order confirmed', 'An order has been confirmed. Review its payment and fulfilment details.'],
   ORDER_CANCELLED: ['Order cancelled', 'An order has been cancelled.'],
   RETURN_REQUESTED: ['New return or exchange request', 'A customer request needs your review.'],
   CONTACT_RECEIVED: ['New support message', 'A customer has contacted the store.'],

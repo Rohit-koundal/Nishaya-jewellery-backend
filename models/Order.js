@@ -18,6 +18,12 @@ const PAYMENT_STATE_TO_STATUS = {
 };
 
 const orderSchema = new mongoose.Schema({
+  // Set at creation, not a default: historical orders must not be emailed.
+  orderNotificationVersion: Number,
+  orderNotificationQueuedAt: Date,
+  whatsappNotificationConsent: { type: new mongoose.Schema({
+    granted: Boolean, phone: String, recordedAt: Date, noticeVersion: String,
+  }, { _id: false }), select: false },
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   orderItems: [{
     product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
@@ -269,6 +275,7 @@ const orderSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 orderSchema.plugin(storeIdPlugin);
+orderSchema.index({ orderNotificationVersion: 1, orderNotificationQueuedAt: 1, createdAt: 1 });
 
 orderSchema.index({ razorpayOrderId: 1 }, { sparse: true });
 orderSchema.index({ user: 1, checkoutAttemptId: 1 }, { unique: true, partialFilterExpression: { checkoutAttemptId: { $type: 'string' } }, name: 'one_order_per_checkout_attempt' });

@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
+require('./catalogTestSetup');
 
 const { request, resetDatabase, startTestEnvironment, stopTestEnvironment, getBaseUrl } = require('./helpers');
 const { createAdmin, createCustomer, createProduct, setSettings, validAddress } = require('./factories');
@@ -391,6 +392,75 @@ test('creating a Razorpay order reserves stock immediately', async () => {
     assert.equal((await Product.findById(product._id)).stock, 4);
     assert.equal((await Order.findById(data.orderId)).paymentStatus, 'Pending');
   });
+});
+
+test('Standard Checkout aliases create a server-priced order and verify all three callback fields', async () => {
+  await withMockRazorpay(async () => {
+    await setSettings({ razorpayEnabled: true, deliveryCharge: 0, freeShippingMinAmount: 0 });
+    const { token } = await createCustomer();
+    const product = await createProduct({ stock: 5, price: 125.55 });
+    const created = await request('/api/create-order', { method: 'POST', token, body: onlineOrderBody(product, {
+      checkoutAttemptId: 'standard_checkout_alias_001', amount: 100, currency: 'USD',
+    }) });
+    assert.equal(created.status, 200, JSON.stringify(created.data));
+    assert.equal(created.data.amount, 12555, 'client-supplied amount must never override the priced cart');
+    assert.equal(created.data.currency, 'INR');
+    assert.equal(created.data.order_id, created.data.razorpayOrderId);
+    assert.equal(created.data.keyId, process.env.RAZORPAY_KEY_ID);
+    assert.equal(JSON.stringify(created.data).includes(KEY_SECRET), false);
+    const paymentId = 'pay_standard_alias';
+    const verified = await request('/api/verify-payment', { method: 'POST', token, body: {
+      razorpay_order_id: created.data.order_id, razorpay_payment_id: paymentId,
+      razorpay_signature: sign(created.data.order_id, paymentId),
+    } });
+    assert.equal(verified.status, 200, JSON.stringify(verified.data));
+    assert.equal(verified.data.order.paymentStatus, 'Paid');
+    assert.equal((await Product.findById(product._id)).stock, 4);
+  });
+});
+
+test('checkout rejects totals below 100 paise without reserving stock; exactly 100 paise is accepted', async () => {
+  await withMockRazorpay(async () => {
+    await setSettings({ razorpayEnabled: true, deliveryCharge: 0, freeShippingMinAmount: 0 });
+    const { token } = await createCustomer();
+    const tooSmall = await createProduct({ price: 0.99 });
+    const rejected = await request('/api/payments/create-order', { method: 'POST', token, body: onlineOrderBody(tooSmall) });
+    assert.equal(rejected.status, 400, JSON.stringify(rejected.data));
+    assert.equal(rejected.data.code, 'VALIDATION_ERROR');
+    assert.equal(await Order.countDocuments(), 0);
+    assert.equal((await Product.findById(tooSmall._id)).stock, tooSmall.stock);
+    const minimum = await createProduct({ price: 1 });
+    const accepted = await request('/api/payments/create-order', { method: 'POST', token, body: onlineOrderBody(minimum) });
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+    assert.equal(accepted.data.amount, 100);
+  });
+});
+
+test('missing or non-string verification fields return 400 and cannot query or mark an order paid', async () => {
+  const { user, token } = await createCustomer();
+  const product = await createProduct({ stock: 5 });
+  const pending = await seedPendingOrder(user, product);
+  const valid = {
+    razorpay_order_id: pending.razorpayOrderId, razorpay_payment_id: 'pay_fields',
+    razorpay_signature: sign(pending.razorpayOrderId, 'pay_fields'),
+  };
+  for (const body of [undefined, {}, ...Object.keys(valid).flatMap(key => [
+    { ...valid, [key]: undefined }, { ...valid, [key]: { $ne: null } }, { ...valid, [key]: ['value'] },
+  ])]) {
+    const response = await request('/api/payments/verify', { method: 'POST', token, body });
+    assert.equal(response.status, 400, JSON.stringify(response.data));
+    assert.equal(response.data.code, 'VALIDATION_ERROR');
+  }
+  assert.equal((await Order.findById(pending._id)).paymentStatus, 'Pending');
+  assert.equal((await Product.findById(product._id)).stock, 5);
+});
+
+test('all create and verify endpoints require authentication', async () => {
+  for (const path of ['/api/payments/create-order', '/api/create-order', '/api/payments/verify', '/api/verify-payment']) {
+    const response = await request(path, { method: 'POST', body: {} });
+    assert.equal(response.status, 401, `${path}: ${JSON.stringify(response.data)}`);
+  }
+  assert.equal(await Order.countDocuments(), 0);
 });
 
 test('a repeated online checkout attempt reuses one order and one stock reservation', async () => {

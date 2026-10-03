@@ -234,6 +234,8 @@ router.put('/business/festival', requireStorePermission('marketing.write'), busi
 router.get('/settings', requireStorePermission('settings.read'), settings.getSettings);
 router.put('/settings', requireStorePermission('settings.write'), stripClientStoreId, settings.updateSettings);
 router.get('/settings/payment-readiness', requireStorePermission('settings.read'), settings.getPaymentReadiness);
+router.get('/settings/order-notifications', requireStorePermission('settings.read'), require('../controllers/orderNotificationController').status);
+router.post('/settings/order-notifications/:id/retry', requireStorePermission('settings.write'), require('../controllers/orderNotificationController').retry);
 router.get('/settings/shipping-readiness', requireStorePermission('settings.read'), delivery.readiness);
 router.get('/design', requireStorePermission('design.read'), customization.getSellerDesign);
 router.put('/design', requireStorePermission('design.write'), customization.updateSellerDesign);

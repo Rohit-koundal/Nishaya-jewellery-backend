@@ -1,7 +1,8 @@
 const crypto = require('crypto');
 
 function verifyRazorpaySignature({ razorpayOrderId, razorpayPaymentId, razorpaySignature, secret }) {
-  if (!razorpayOrderId || !razorpayPaymentId || !razorpaySignature || !secret) return false;
+  if ([razorpayOrderId, razorpayPaymentId, razorpaySignature, secret].some(value => typeof value !== 'string' || !value)) return false;
+  if (!/^[a-f0-9]{64}$/.test(razorpaySignature)) return false;
   const expected = crypto
     .createHmac('sha256', secret)
     .update(`${razorpayOrderId}|${razorpayPaymentId}`)

@@ -1,4 +1,5 @@
 const Razorpay = require('razorpay');
+const { ApiError } = require('../utils/apiError');
 
 let client;
 
@@ -18,6 +19,9 @@ function getRazorpayClient() {
 }
 
 async function createRazorpayOrder({ amountInPaise, receipt, notes = {} }) {
+  if (!Number.isSafeInteger(amountInPaise) || amountInPaise < 100) {
+    throw new ApiError('VALIDATION_ERROR', 'Online payment amount must be an integer of at least 100 paise.');
+  }
   if (!isRazorpayConfigured()) throw new Error('Razorpay is not configured');
 
   if (process.env.RAZORPAY_MOCK === '1') {

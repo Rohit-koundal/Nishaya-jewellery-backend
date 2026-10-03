@@ -23,6 +23,8 @@ function rebrandLegacySettings(data) {
 }
 
 const SETTINGS_PERMISSION_FIELDS = Object.freeze({
+  // Notification controls use the existing store-content permission.
+  notifications: ['orderAdminEmailEnabled', 'orderCustomerEmailEnabled', 'orderNotificationEmail', 'orderAdminWhatsappEnabled', 'orderCustomerWhatsappEnabled', 'orderNotificationWhatsapp'],
   branding: ['storeName', 'brandIdentityEnabled', 'logoUrl', 'faviconUrl', 'tagline', 'seoTitle', 'seoDescription', 'socialShareImage', 'searchIndexingEnabled', 'legalBusinessName', 'gstin', 'invoicePrefix', 'billingAddress'],
   content: ['contactDetailsEnabled', 'announcementEnabled', 'announcementText', 'supportHours', 'invoiceNote', 'contactEmail', 'contactPhone', 'whatsappNumber', 'address', 'footerText', 'returnPolicy', 'privacyPolicy', 'termsConditions', 'shippingPolicy', 'cancellationPolicy', 'sizeGuide', 'faqs', 'ourStory'],
   pricing: ['acceptingOrders', 'orderPauseMessage', 'minimumOrderAmount', 'platformFee', 'gstRate'],
@@ -38,6 +40,12 @@ exports.getSettings = asyncHandler(async (req, res) => {
   if ((!req.user || req.user.role !== 'admin') && !req.storeMember) {
     delete data.shippingPickup;
     delete data.shippingRateZones;
+    delete data.orderNotificationEmail;
+    delete data.orderAdminEmailEnabled;
+    delete data.orderCustomerEmailEnabled;
+    delete data.orderAdminWhatsappEnabled;
+    delete data.orderCustomerWhatsappEnabled;
+    delete data.orderNotificationWhatsapp;
   }
   res.json(rebrandLegacySettings(data));
 });
@@ -59,6 +67,8 @@ exports.getPaymentMethods = asyncHandler(async (req, res) => {
       pincode: String(req.query.pincode || ''),
     }),
     codCharge: Math.max(0, Number(settings.codCharge || 0)),
+    notifications: { whatsappAvailable: settings.orderCustomerWhatsappEnabled === true
+      && require('../services/orderNotificationWhatsapp').whatsappConfiguration('CUSTOMER').configured },
     codMaxAmount: Number(settings.codMaxAmount || 0) || null,
     codMinAmount: Number(settings.codMinAmount || 0) || null,
     deliveryCharge: Number(settings.deliveryCharge ?? 99),
@@ -105,7 +115,8 @@ exports.updateSettings = asyncHandler(async (req, res) => {
     const changed = fields => fields.some(key => updates[key] !== undefined && JSON.stringify(updates[key]) !== JSON.stringify(current[key]));
     const labels = { branding: 'Brand identity', content: 'Store content', pricing: 'Pricing', shipping: 'Shipping', payments: 'Payment', returns: 'Returns', social: 'Social links' };
     for (const [capability, fields] of Object.entries(SETTINGS_PERMISSION_FIELDS)) {
-      if (permissions?.[capability] === false && changed(fields)) throw new ApiError('FORBIDDEN', `${labels[capability]} configuration is managed by the platform owner`);
+      const permission = capability === 'notifications' ? 'content' : capability;
+      if (permissions?.[permission] === false && changed(fields)) throw new ApiError('FORBIDDEN', `${labels[permission]} configuration is managed by the platform owner`);
     }
   }
   const filter = previous ? { _id: previous._id, ...(current.updatedAt ? { updatedAt: current.updatedAt } : {}) } : { ...(req.store?._id ? { storeId: req.store._id } : {}) };
